@@ -1,10 +1,10 @@
 
 import os
-import time
 import requests
 import pandas as pd
 
 from strategy import analyze_market
+from chart import create_chart
 
 XT_URL = "https://fapi.xt.com/future/market/v1/public/q/kline"
 
@@ -12,40 +12,20 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-def send_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    response = requests.post(
-        url,
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        },
-        timeout=20
-    )
-
-    print("Telegram Status:", response.status_code)
-    print("Telegram Response:", response.text)
-
-    response.raise_for_status()
-
-
 def get_market_data(interval):
     params = {
         "symbol": "btc_usdt",
         "interval": interval,
-        "limit": 200
+        "limit": 250
     }
 
     response = requests.get(
         XT_URL,
         params=params,
-        timeout=20
+        timeout=30
     )
 
-    print(f"XT {interval} Status:", response.status_code)
     response.raise_for_status()
-
     result = response.json()
 
     if result.get("returnCode") != 0:
@@ -54,7 +34,7 @@ def get_market_data(interval):
     rows = result.get("result", [])
 
     if not rows:
-        raise Exception(f"No market data for {interval}")
+        raise Exception(f"No data for {interval}")
 
     df = pd.DataFrame(rows)
 
@@ -67,15 +47,15 @@ def get_market_data(interval):
         "v": "volume"
     })
 
-    required = [
+    columns = [
         "timestamp", "open", "high",
         "low", "close", "volume"
     ]
 
-    df = df[required].copy()
+    df = df[columns].copy()
 
-    for column in ["open", "high", "low", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["timestamp"] = pd.to_numeric(
         df["timestamp"], errors="coerce"
@@ -86,86 +66,177 @@ def get_market_data(interval):
     df = df.drop_duplicates("timestamp")
     df = df.reset_index(drop=True)
 
-    # حذف کندل در حال تشکیل
+    # Remove the currently forming candle
     if len(df) > 1:
         df = df.iloc[:-1].copy()
 
-    if len(df) < 60:
-        raise Exception(f"Not enough candles for {interval}")
+    if len(df) < 210:
+        raise Exception(
+            f"Not enough candles for {interval}: {len(df)}"
+        )
 
     return df.reset_index(drop=True)
 
 
-def get_trend(df):
-    close = df["close"]
+def send_photo(filename, caption):
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendPhoto"
+    )
 
-    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    with open(filename, "rb") as photo:
+        response = requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption
+            },
+            files={"photo": photo},
+            timeout=60
+        )
 
-    if ema20 > ema50:
-        return "Bullish"
+    print("Telegram Photo Status:", response.status_code)
+    print("Telegram Photo Response:", response.text)
 
-    if ema20 < ema50:
-        return "Bearish"
+    response.raise_for_status()
 
-    return "Neutral"
+    result = response.json()
+    if not result.get("ok"):
+        raise Exception(f"Telegram error: {result}")
+
+
+def build_report(a):
+    def show(value):
+        return f"{value:.2f}" if value is not None else "N/A"
+
+    signal_emoji = {
+        "LONG": "🟢",
+        "SHORT": "🔴",
+        "NO SIGNAL": "⏳"
+    }.get(a["signal"], "⏳")
+
+    reasons = "\n".join(
+        f"• {reason}" for reason in a["reasons"][:8]
+    )
+
+    if not reasons:
+        reasons = "No strong confirmation"
+
+    return f"""
+{signal_emoji} BTC/USDT FUTURES ANALYSIS
+━━━━━━━━━━━━━━━━━━
+
+Exchange: XT
+Timeframe: 15m
+Price: {show(a['price'])} USDT
+
+📊 MULTI-TIMEFRAME
+━━━━━━━━━━━━━━━━━━
+15m: {a['trend_15m']}
+1h: {a['trend_1h']}
+4h: {a['trend_4h']}
+
+📈 TECHNICAL INDICATORS
+━━━━━━━━━━━━━━━━━━
+EMA20: {show(a['ema20'])}
+EMA50: {show(a['ema50'])}
+EMA200: {show(a['ema200'])}
+RSI: {show(a['rsi'])}
+MACD: {show(a['macd'])}
+MACD Signal: {show(a['macd_signal'])}
+ATR: {show(a['atr'])}
+Volume Ratio: {show(a['volume_ratio'])}
+
+🧠 SMART MONEY
+━━━━━━━━━━━━━━━━━━
+Bullish BOS: {a['bull_bos']}
+Bearish BOS: {a['bear_bos']}
+Bullish FVG: {a['bullish_fvg']}
+Bearish FVG: {a['bearish_fvg']}
+Bullish OB: {a['bullish_ob']}
+Bearish OB: {a['bearish_ob']}
+Sell-side Sweep: {a['bull_sweep']}
+Buy-side Sweep: {a['bear_sweep']}
+Market Zone: {a['zone']}
+
+🎯 SIGNAL SCORING
+━━━━━━━━━━━━━━━━━━
+LONG Score: {a['long_score']}
+SHORT Score: {a['short_score']}
+Algorithm Score: {a['confidence']}%
+
+🚦 FINAL RESULT
+━━━━━━━━━━━━━━━━━━
+Signal: {a['signal']}
+
+Entry: {show(a['entry'])}
+Stop Loss: {show(a['stop_loss'])}
+TP1: {show(a['tp1'])}
+TP2: {show(a['tp2'])}
+TP3: {show(a['tp3'])}
+
+📝 REASONS
+━━━━━━━━━━━━━━━━━━
+{reasons}
+
+━━━━━━━━━━━━━━━━━━
+Analysis only - No trade executed.
+Algorithm score is not a probability of profit.
+"""
+
+
+def send_error(message):
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendMessage"
+    )
+
+    requests.post(
+        url,
+        data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": "BTC Bot Error:\n" + str(message)[:3000]
+        },
+        timeout=20
+    )
 
 
 def main():
-    print("Bitcoin Futures Multi-Timeframe Bot Started")
+    print("BTC Futures Advanced Bot Started")
+
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        raise Exception("Telegram secrets are missing")
 
     try:
         df_15m = get_market_data("15m")
         df_1h = get_market_data("1h")
         df_4h = get_market_data("4h")
 
-        trend_15m = get_trend(df_15m)
-        trend_1h = get_trend(df_1h)
-        trend_4h = get_trend(df_4h)
+        analysis = analyze_market(
+            df_15m,
+            df_1h,
+            df_4h
+        )
 
-        analysis = analyze_market(df_15m, df_1h, df_4h)
+        print("Signal:", analysis["signal"])
+        print("LONG:", analysis["long_score"])
+        print("SHORT:", analysis["short_score"])
 
-        print("15m Trend:", trend_15m)
-        print("1h Trend:", trend_1h)
-        print("4h Trend:", trend_4h)
+        chart_file = create_chart(
+            df_15m,
+            analysis
+        )
 
-        print("Market analysis completed")
+        report = build_report(analysis)
 
-        message = f"""
-BTC/USDT FUTURES ANALYSIS
-━━━━━━━━━━━━━━━━━━
+        send_photo(chart_file, report)
 
-Exchange: XT
-Price: {analysis['price']:.2f} USDT
-
-MULTI-TIMEFRAME ANALYSIS
-━━━━━━━━━━━━━━━━━━
-15 Minutes: {trend_15m}
-1 Hour: {trend_1h}
-4 Hours: {trend_4h}
-
-15M STRATEGY RESULT
-━━━━━━━━━━━━━━━━━━
-Signal: {analysis['signal']}
-LONG Score: {analysis['long_score']}
-SHORT Score: {analysis['short_score']}
-Confidence: {analysis['confidence']}%
-
-━━━━━━━━━━━━━━━━━━
-Analysis only - No trade executed.
-"""
-
-        send_message(message)
+        print("Analysis and chart sent successfully")
 
     except Exception as error:
         print("BOT ERROR:", str(error))
-
-        try:
-            send_message(
-                "BTC Bot Error:\n" + str(error)[:3000]
-            )
-        except Exception as telegram_error:
-            print("Telegram Error:", str(telegram_error))
+        send_error(error)
+        raise
 
 
 if __name__ == "__main__":
