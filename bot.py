@@ -1,30 +1,56 @@
-
+```python
 import os
-import time
 import requests
 import ccxt
 import pandas as pd
-
 from strategy import analyze_market
 
+# Telegram settings
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# Binance Futures
 exchange = ccxt.binanceusdm({
     "enableRateLimit": True
 })
 
+
 def send_message(message):
+    if not TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN is missing!")
+
+    if not CHAT_ID:
+        raise ValueError("TELEGRAM_CHAT_ID is missing!")
+
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
-    requests.post(
-        url,
-        json={
-            "chat_id": CHAT_ID,
-            "text": message
-        },
-        timeout=20
-    ).raise_for_status()
+    try:
+        response = requests.post(
+            url,
+            json={
+                "chat_id": CHAT_ID,
+                "text": message
+            },
+            timeout=20
+        )
+
+        print("Telegram status:", response.status_code)
+        print("Telegram response:", response.text)
+
+        response.raise_for_status()
+
+        result = response.json()
+
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"Telegram error: {result}"
+            )
+
+        print("Telegram message sent successfully!")
+
+    except requests.exceptions.RequestException as error:
+        print("Telegram connection error:", error)
+        raise
 
 
 def get_market_data():
@@ -51,37 +77,42 @@ def get_market_data():
 
 
 def main():
-    last_signal_candle = None
 
-    send_message("Bitcoin Futures Bot Started!")
+    print("Bitcoin Futures Bot Started!")
 
-    while True:
-        try:
-            df = get_market_data()
-            signal = analyze_market(df)
+    try:
+        df = get_market_data()
 
-            candle_time = int(df.iloc[-1]["timestamp"])
+        if len(df) < 60:
+            print("Not enough market data!")
+            return
 
-            if signal and candle_time != last_signal_candle:
+        signal = analyze_market(df)
 
-                message = (
-                    f"BTC/USDT FUTURES\n"
-                    f"Signal: {signal['side']}\n"
-                    f"Entry: {signal['entry']:.2f}\n"
-                    f"Stop Loss: {signal['stop']:.2f}\n"
-                    f"Take Profit: {signal['target']:.2f}\n"
-                    f"RSI: {signal['rsi']}\n\n"
-                    f"Signal Only - No Trade Executed"
-                )
+        if signal is None:
+            print("No trading signal found.")
+            return
 
-                send_message(message)
-                last_signal_candle = candle_time
+        message = (
+            "🚨 BTC/USDT FUTURES SIGNAL 🚨\n\n"
+            f"Direction: {signal['side']}\n"
+            f"Entry Price: {signal['entry']:.2f}\n"
+            f"Stop Loss: {signal['stop']:.2f}\n"
+            f"Take Profit: {signal['target']:.2f}\n"
+            f"RSI: {signal['rsi']}\n\n"
+            "Timeframe: 15 Minutes\n"
+            "Signal Only - No Trade Executed"
+        )
 
-        except Exception as error:
-            print("ERROR:", error)
+        send_message(message)
 
-        time.sleep(60)
+        print("Signal successfully processed.")
+
+    except Exception as error:
+        print("BOT ERROR:", str(error))
+        raise
 
 
 if __name__ == "__main__":
     main()
+```
