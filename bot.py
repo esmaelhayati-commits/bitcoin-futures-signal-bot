@@ -3,10 +3,12 @@ import requests
 import pandas as pd
 from strategy import analyze_market
 
+# Telegram settings
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BYBIT_URL = "https://api.bybit.com/v5/market/kline"
+# XT Futures API
+XT_URL = "https://fapi.xt.com/future/market/v1/public/q/kline"
 
 
 def send_message(message):
@@ -30,47 +32,95 @@ def send_message(message):
     print("Telegram response:", response.text)
     response.raise_for_status()
 
+    result = response.json()
+
+    if not result.get("ok"):
+        raise RuntimeError(f"Telegram error: {result}")
+
 
 def get_market_data():
+
     params = {
-        "category": "linear",
-        "symbol": "BTCUSDT",
-        "interval": "15",
+        "symbol": "btc_usdt",
+        "interval": "15m",
         "limit": 200
     }
 
     response = requests.get(
-        BYBIT_URL,
+        XT_URL,
         params=params,
         timeout=20
     )
+
+    print("XT HTTP Status:", response.status_code)
+    print("XT Response:", response.text[:2000])
 
     response.raise_for_status()
 
     data = response.json()
 
-    if data.get("retCode") != 0:
+    if data.get("returnCode") not in (0, "0", None):
         raise RuntimeError(
-            f"Bybit API error: {data.get('retMsg')}"
+            f"XT API error: {data}"
         )
 
-    candles = data["result"]["list"]
+    # استخراج اطلاعات کندل‌ها
+    result = data.get("result", data.get("data"))
+
+    if isinstance(result, dict):
+        candles = result.get("items", result.get("list", result.get("data")))
+    else:
+        candles = result
 
     if not candles:
-        raise RuntimeError("No market data received")
+        raise RuntimeError(
+            f"No candle data received from XT: {data}"
+        )
 
-    df = pd.DataFrame(
-        candles,
-        columns=[
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "turnover"
-        ]
-    )
+    # تبدیل اطلاعات به DataFrame
+    if isinstance(candles[0], dict):
+
+        df = pd.DataFrame(candles)
+
+        column_map = {
+            "t": "timestamp",
+            "o": "open",
+            "h": "high",
+            "l": "low",
+            "c": "close",
+            "v": "volume"
+        }
+
+        df = df.rename(columns=column_map)
+
+    else:
+
+        df = pd.DataFrame(
+            candles,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume"
+            ]
+        )
+
+    required = [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]
+
+    for column in required:
+        if column not in df.columns:
+            raise RuntimeError(
+                f"Missing column from XT response: {column}"
+            )
 
     for column in ["open", "high", "low", "close", "volume"]:
         df[column] = pd.to_numeric(df[column])
@@ -79,32 +129,34 @@ def get_market_data():
 
     df = df.sort_values("timestamp").reset_index(drop=True)
 
-    # حذف کندل در حال تشکیل
+    # حذف آخرین کندل برای جلوگیری از تحلیل کندل باز
     df = df.iloc[:-1].copy()
 
     if len(df) < 60:
-        raise RuntimeError("Not enough market data")
+        raise RuntimeError("Not enough candle data")
 
-    print("Market data received successfully")
+    print("XT market data received successfully")
     print("Latest BTC price:", df.iloc[-1]["close"])
 
     return df
 
 
 def main():
+
     print("Bitcoin Futures Bot Started")
+    print("Exchange: XT")
 
     df = get_market_data()
 
     signal = analyze_market(df)
 
     if signal is None:
-        print("No signal found")
+        print("No trading signal found")
         return
 
     message = (
         "BTC/USDT FUTURES SIGNAL\n\n"
-        "Exchange: Bybit\n"
+        "Exchange: XT\n"
         f"Direction: {signal['side']}\n"
         f"Entry: {signal['entry']:.2f}\n"
         f"Stop Loss: {signal['stop']:.2f}\n"
