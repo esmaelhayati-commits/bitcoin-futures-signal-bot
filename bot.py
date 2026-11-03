@@ -1,3 +1,4 @@
+
 import os
 import requests
 import pandas as pd
@@ -29,7 +30,9 @@ def send_message(message):
         timeout=20
     )
 
-    print("Telegram response:", response.text)
+    print("Telegram HTTP Status:", response.status_code)
+    print("Telegram Response:", response.text)
+
     response.raise_for_status()
 
     result = response.json()
@@ -39,7 +42,6 @@ def send_message(message):
 
 
 def get_market_data():
-
     params = {
         "symbol": "btc_usdt",
         "interval": "15m",
@@ -60,26 +62,22 @@ def get_market_data():
     data = response.json()
 
     if data.get("returnCode") not in (0, "0", None):
-        raise RuntimeError(
-            f"XT API error: {data}"
-        )
+        raise RuntimeError(f"XT API error: {data}")
 
-    # استخراج اطلاعات کندل‌ها
     result = data.get("result", data.get("data"))
 
     if isinstance(result, dict):
-        candles = result.get("items", result.get("list", result.get("data")))
+        candles = result.get(
+            "items",
+            result.get("list", result.get("data"))
+        )
     else:
         candles = result
 
     if not candles:
-        raise RuntimeError(
-            f"No candle data received from XT: {data}"
-        )
+        raise RuntimeError(f"No candle data received from XT: {data}")
 
-    # تبدیل اطلاعات به DataFrame
     if isinstance(candles[0], dict):
-
         df = pd.DataFrame(candles)
 
         column_map = {
@@ -94,7 +92,6 @@ def get_market_data():
         df = df.rename(columns=column_map)
 
     else:
-
         df = pd.DataFrame(
             candles,
             columns=[
@@ -123,13 +120,16 @@ def get_market_data():
             )
 
     for column in ["open", "high", "low", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column])
+        df[column] = pd.to_numeric(df[column], errors="raise")
 
-    df["timestamp"] = pd.to_numeric(df["timestamp"])
+    df["timestamp"] = pd.to_numeric(
+        df["timestamp"],
+        errors="raise"
+    )
 
     df = df.sort_values("timestamp").reset_index(drop=True)
 
-    # حذف آخرین کندل برای جلوگیری از تحلیل کندل باز
+    # Remove the currently forming candle
     df = df.iloc[:-1].copy()
 
     if len(df) < 60:
@@ -142,9 +142,13 @@ def get_market_data():
 
 
 def main():
-
     print("Bitcoin Futures Bot Started")
     print("Exchange: XT")
+
+    # Temporary Telegram connection test
+    send_message(
+        "Test: Bitcoin Futures Bot connected successfully!"
+    )
 
     df = get_market_data()
 
