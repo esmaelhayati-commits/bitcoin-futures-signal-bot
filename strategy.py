@@ -22,16 +22,12 @@ def add_indicators(df):
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.ewm(
-        alpha=1 / 14, adjust=False
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / 14, adjust=False
-    ).mean()
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["rsi"] = 100 - (100 / (1 + rs))
+    df["rsi"] = df["rsi"].fillna(50)
 
     # MACD
     ema12 = close.ewm(span=12, adjust=False).mean()
@@ -43,64 +39,46 @@ def add_indicators(df):
     ).mean()
 
     # ATR
-    previous_close = close.shift(1)
+    prev_close = close.shift(1)
 
     tr = pd.concat([
         high - low,
-        (high - previous_close).abs(),
-        (low - previous_close).abs()
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
     ], axis=1).max(axis=1)
 
-    df["atr"] = tr.ewm(
-        alpha=1 / 14, adjust=False
-    ).mean()
+    df["atr"] = tr.ewm(alpha=1/14, adjust=False).mean()
 
     # Ichimoku
     tenkan = (
-        high.rolling(9).max() +
-        low.rolling(9).min()
+        high.rolling(9).max() + low.rolling(9).min()
     ) / 2
 
     kijun = (
-        high.rolling(26).max() +
-        low.rolling(26).min()
+        high.rolling(26).max() + low.rolling(26).min()
     ) / 2
 
-    span_a = (tenkan + kijun) / 2
-    span_b = (
-        high.rolling(52).max() +
-        low.rolling(52).min()
-    ) / 2
+    df["cloud_a"] = ((tenkan + kijun) / 2).shift(26)
 
-    df["cloud_a"] = span_a.shift(26)
-    df["cloud_b"] = span_b.shift(26)
+    df["cloud_b"] = (
+        (high.rolling(52).max() + low.rolling(52).min()) / 2
+    ).shift(26)
 
     # Volume
     df["volume_avg"] = volume.rolling(20).mean()
 
-    # Previous market levels
+    # Previous 20-candle levels
     df["previous_high"] = high.shift(1).rolling(20).max()
     df["previous_low"] = low.shift(1).rolling(20).min()
 
-    # FVG: three-candle imbalance
+    # Three-candle FVG
     df["bullish_fvg"] = low > high.shift(2)
     df["bearish_fvg"] = high < low.shift(2)
-
-    # Simple Order Block approximation
-    df["bullish_ob"] = (
-        (close.shift(1) < df["open"].shift(1)) &
-        (close > high.shift(1))
-    )
-
-    df["bearish_ob"] = (
-        (close.shift(1) > df["open"].shift(1)) &
-        (close < low.shift(1))
-    )
 
     return df
 
 
-def get_timeframe_trend(df):
+def get_trend(df):
     data = add_indicators(df)
     last = data.iloc[-1]
 
@@ -117,43 +95,29 @@ def analyze_market(df_15m, df_1h, df_4h):
     data = add_indicators(df_15m)
 
     last = data.iloc[-1]
-    previous = data.iloc[-2]
-
     price = float(last["close"])
     atr = float(last["atr"])
 
-    trend_1h = get_timeframe_trend(df_1h)
-    trend_4h = get_timeframe_trend(df_4h)
+    trend_15m = get_trend(df_15m)
+    trend_1h = get_trend(df_1h)
+    trend_4h = get_trend(df_4h)
 
     long_score = 0
     short_score = 0
     reasons = []
 
-    # 15m EMA trend
-    if last["ema20"] > last["ema50"]:
-        long_score += 2
-        reasons.append("15m EMA bullish")
-
-    elif last["ema20"] < last["ema50"]:
-        short_score += 2
-        reasons.append("15m EMA bearish")
-
-    # Higher timeframe confirmation
-    if trend_1h == "Bullish":
-        long_score += 2
-        reasons.append("1h trend bullish")
-
-    elif trend_1h == "Bearish":
-        short_score += 2
-        reasons.append("1h trend bearish")
-
-    if trend_4h == "Bullish":
-        long_score += 3
-        reasons.append("4h trend bullish")
-
-    elif trend_4h == "Bearish":
-        short_score += 3
-        reasons.append("4h trend bearish")
+    # Multi-timeframe trend
+    for trend, weight, label in [
+        (trend_15m, 2, "15m"),
+        (trend_1h, 2, "1h"),
+        (trend_4h, 3, "4h")
+    ]:
+        if trend == "Bullish":
+            long_score += weight
+            reasons.append(f"{label} trend bullish")
+        elif trend == "Bearish":
+            short_score += weight
+            reasons.append(f"{label} trend bearish")
 
     # EMA200
     if price > last["ema200"]:
@@ -174,26 +138,31 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 1
 
     # Ichimoku
-    cloud_top = max(last["cloud_a"], last["cloud_b"])
-    cloud_bottom = min(last["cloud_a"], last["cloud_b"])
+    cloud_values = [last["cloud_a"], last["cloud_b"]]
 
-    if price > cloud_top:
-        long_score += 1
-    elif price < cloud_bottom:
-        short_score += 1
+    if all(pd.notna(x) for x in cloud_values):
+        cloud_top = max(cloud_values)
+        cloud_bottom = min(cloud_values)
+
+        if price > cloud_top:
+            long_score += 1
+        elif price < cloud_bottom:
+            short_score += 1
 
     # Volume confirmation
+    volume_avg = last["volume_avg"]
     volume_ratio = (
-        last["volume"] / last["volume_avg"]
-        if last["volume_avg"] and last["volume_avg"] > 0
-        else 0
+        float(last["volume"]) / float(volume_avg)
+        if pd.notna(volume_avg) and volume_avg > 0 else 0
     )
 
     if volume_ratio >= 1.2:
-        if price > previous["close"]:
+        if price > float(data.iloc[-2]["close"]):
             long_score += 1
-        elif price < previous["close"]:
+            reasons.append("Strong bullish volume")
+        elif price < float(data.iloc[-2]["close"]):
             short_score += 1
+            reasons.append("Strong bearish volume")
 
     # BOS
     bull_bos = price > last["previous_high"]
@@ -209,13 +178,13 @@ def analyze_market(df_15m, df_1h, df_4h):
 
     # Liquidity sweep
     bull_sweep = (
-        last["low"] < last["previous_low"] and
-        price > last["previous_low"]
+        last["low"] < last["previous_low"]
+        and price > last["previous_low"]
     )
 
     bear_sweep = (
-        last["high"] > last["previous_high"] and
-        price < last["previous_high"]
+        last["high"] > last["previous_high"]
+        and price < last["previous_high"]
     )
 
     if bull_sweep:
@@ -226,9 +195,33 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 2
         reasons.append("Buy-side liquidity sweep")
 
-    # FVG
-    bullish_fvg = bool(data["bullish_fvg"].tail(10).any())
-    bearish_fvg = bool(data["bearish_fvg"].tail(10).any())
+    # FVG zones from recent candles
+    bullish_fvg = False
+    bearish_fvg = False
+    fvg_low = None
+    fvg_high = None
+
+    for i in range(max(2, len(data) - 20), len(data)):
+        candle = data.iloc[i]
+
+        if candle["low"] > data.iloc[i-2]["high"]:
+            zone_low = float(data.iloc[i-2]["high"])
+            zone_high = float(candle["low"])
+
+            # Approximate mitigation check
+            later = data.iloc[i+1:]
+            if later.empty or later["low"].min() > zone_low:
+                bullish_fvg = True
+                fvg_low, fvg_high = zone_low, zone_high
+
+        if candle["high"] < data.iloc[i-2]["low"]:
+            zone_low = float(candle["high"])
+            zone_high = float(data.iloc[i-2]["low"])
+
+            later = data.iloc[i+1:]
+            if later.empty or later["high"].max() < zone_high:
+                bearish_fvg = True
+                fvg_low, fvg_high = zone_low, zone_high
 
     if bullish_fvg:
         long_score += 1
@@ -238,57 +231,105 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 1
         reasons.append("Bearish FVG detected")
 
-    # Order Block approximation
-    bullish_ob = bool(data["bullish_ob"].tail(10).any())
-    bearish_ob = bool(data["bearish_ob"].tail(10).any())
+    # Simple order block approximation
+    bullish_ob = False
+    bearish_ob = False
+
+    for i in range(max(1, len(data) - 10), len(data)):
+        current = data.iloc[i]
+        previous = data.iloc[i-1]
+
+        if (
+            previous["close"] < previous["open"]
+            and current["close"] > previous["high"]
+        ):
+            bullish_ob = True
+
+        if (
+            previous["close"] > previous["open"]
+            and current["close"] < previous["low"]
+        ):
+            bearish_ob = True
 
     if bullish_ob:
         long_score += 1
-        reasons.append("Bullish OB detected")
+        reasons.append("Bullish Order Block approximation")
 
     if bearish_ob:
         short_score += 1
-        reasons.append("Bearish OB detected")
+        reasons.append("Bearish Order Block approximation")
 
-    # Final decision
+    # Premium / Discount
+    recent_high = float(data["high"].tail(50).max())
+    recent_low = float(data["low"].tail(50).min())
+    midpoint = (recent_high + recent_low) / 2
+
+    zone = "Premium" if price > midpoint else "Discount"
+
+    # Final signal
     signal = "NO SIGNAL"
     entry = None
     stop_loss = None
-    take_profit = None
+    tp1 = None
+    tp2 = None
+    tp3 = None
 
-    if long_score >= 9 and long_score - short_score >= 3:
-        signal = "LONG"
-        entry = price
-        stop_loss = price - (1.5 * atr)
-        take_profit = price + (3 * atr)
+    if atr > 0:
+        if long_score >= 10 and long_score - short_score >= 3:
+            signal = "LONG"
+            entry = price
+            stop_loss = price - 1.5 * atr
+            tp1 = price + 1.5 * atr
+            tp2 = price + 2.5 * atr
+            tp3 = price + 3.5 * atr
 
-    elif short_score >= 9 and short_score - long_score >= 3:
-        signal = "SHORT"
-        entry = price
-        stop_loss = price + (1.5 * atr)
-        take_profit = price - (3 * atr)
+        elif short_score >= 10 and short_score - long_score >= 3:
+            signal = "SHORT"
+            entry = price
+            stop_loss = price + 1.5 * atr
+            tp1 = price - 1.5 * atr
+            tp2 = price - 2.5 * atr
+            tp3 = price - 3.5 * atr
 
-    max_score = 17
-    confidence = round(
-        min(100, max(long_score, short_score) / max_score * 100),
-        1
-    )
+    max_score = max(long_score, short_score)
+    confidence = round(min(100, max_score / 17 * 100), 1)
 
     return {
         "signal": signal,
         "price": round(price, 2),
         "entry": round(entry, 2) if entry is not None else None,
         "stop_loss": round(stop_loss, 2) if stop_loss is not None else None,
-        "take_profit": round(take_profit, 2) if take_profit is not None else None,
+        "tp1": round(tp1, 2) if tp1 is not None else None,
+        "tp2": round(tp2, 2) if tp2 is not None else None,
+        "tp3": round(tp3, 2) if tp3 is not None else None,
         "long_score": long_score,
         "short_score": short_score,
         "confidence": confidence,
+        "trend_15m": trend_15m,
         "trend_1h": trend_1h,
         "trend_4h": trend_4h,
+        "rsi": round(float(last["rsi"]), 2),
+        "macd": round(float(last["macd"]), 2),
+        "macd_signal": round(float(last["macd_signal"]), 2),
+        "atr": round(atr, 2),
+        "ema20": round(float(last["ema20"]), 2),
+        "ema50": round(float(last["ema50"]), 2),
+        "ema200": round(float(last["ema200"]), 2),
+        "volume_ratio": round(volume_ratio, 2),
         "bullish_fvg": bullish_fvg,
         "bearish_fvg": bearish_fvg,
+        "fvg_low": fvg_low,
+        "fvg_high": fvg_high,
         "bullish_ob": bullish_ob,
         "bearish_ob": bearish_ob,
-        "volume_ratio": round(float(volume_ratio), 2),
+        "bull_bos": bool(bull_bos),
+        "bear_bos": bool(bear_bos),
+        "bull_sweep": bool(bull_sweep),
+        "bear_sweep": bool(bear_sweep),
+        "zone": zone,
         "reasons": reasons
     }
+
+
+def chart_indicators(df):
+    return add_indicators(df)
