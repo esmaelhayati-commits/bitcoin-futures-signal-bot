@@ -123,7 +123,7 @@ def main():
         trend_1h = get_trend(df_1h)
         trend_4h = get_trend(df_4h)
 
-        analysis = analyze_market(df_15m)
+        analysis = analyze_market(df_15m, df_1h, df_4h)
 
         print("15m Trend:", trend_15m)
         print("1h Trend:", trend_1h)
