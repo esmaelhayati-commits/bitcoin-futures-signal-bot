@@ -1,242 +1,202 @@
-
+import json
 import os
-import requests
+import time
+
 import pandas as pd
+import requests
 
-from strategy import analyze_market
-from chart import create_chart
+from strategy import get_signal
 
-XT_URL = "https://fapi.xt.com/future/market/v1/public/q/kline"
+BASE = "https://fapi.xt.com"
+INTERVAL = "5m"
+INTERVAL_MS = 5 * 60 * 1000
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SYMBOLS = ["btc_usdt", "eth_usdt", "sol_usdt", "xrp_usdt", "doge_usdt",
+           "bnb_usdt", "ada_usdt", "link_usdt", "avax_usdt", "ltc_usdt"]
 
+START_BALANCE = 10.0
+LEVERAGE = 20
+MARGIN_PER_TRADE = 2.0
+MAX_POSITIONS = 3
+SL_PCT = 0.015
+TP_PCT = 0.03
+FEE = 0.0006  # کارمزد فرضی هر طرف
 
-def get_market_data(interval):
-    params = {
-        "symbol": "btc_usdt",
-        "interval": interval,
-        "limit": 250
-    }
-
-    response = requests.get(
-        XT_URL,
-        params=params,
-        timeout=30
-    )
-
-    response.raise_for_status()
-    result = response.json()
-
-    if result.get("returnCode") != 0:
-        raise Exception(f"XT API Error: {result}")
-
-    rows = result.get("result", [])
-
-    if not rows:
-        raise Exception(f"No data for {interval}")
-
-    df = pd.DataFrame(rows)
-
-    df = df.rename(columns={
-        "t": "timestamp",
-        "o": "open",
-        "h": "high",
-        "l": "low",
-        "c": "close",
-        "v": "volume"
-    })
-
-    columns = [
-        "timestamp", "open", "high",
-        "low", "close", "volume"
-    ]
-
-    df = df[columns].copy()
-
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["timestamp"] = pd.to_numeric(
-        df["timestamp"], errors="coerce"
-    )
-
-    df = df.dropna()
-    df = df.sort_values("timestamp")
-    df = df.drop_duplicates("timestamp")
-    df = df.reset_index(drop=True)
-
-    # Remove the currently forming candle
-    if len(df) > 1:
-        df = df.iloc[:-1].copy()
-
-    if len(df) < 210:
-        raise Exception(
-            f"Not enough candles for {interval}: {len(df)}"
-        )
-
-    return df.reset_index(drop=True)
+STATE_FILE = "state.json"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
-def send_photo(filename, caption):
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendPhoto"
-    )
-
-    with open(filename, "rb") as photo:
-        response = requests.post(
-            url,
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "caption": caption
-            },
-            files={"photo": photo},
-            timeout=60
-        )
-
-    print("Telegram Photo Status:", response.status_code)
-    print("Telegram Photo Response:", response.text)
-
-    response.raise_for_status()
-
-    result = response.json()
-    if not result.get("ok"):
-        raise Exception(f"Telegram error: {result}")
+def tg(text):
+    if not TOKEN or not CHAT_ID:
+        print("TELEGRAM:", text)
+        return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                      data={"chat_id": CHAT_ID, "text": text}, timeout=15)
+    except Exception as e:
+        print("telegram error:", e)
 
 
-def build_report(a):
-    def show(value):
-        return f"{value:.2f}" if value is not None else "N/A"
-
-    signal_emoji = {
-        "LONG": "🟢",
-        "SHORT": "🔴",
-        "NO SIGNAL": "⏳"
-    }.get(a["signal"], "⏳")
-
-    reasons = "\n".join(
-        f"• {reason}" for reason in a["reasons"][:8]
-    )
-
-    if not reasons:
-        reasons = "No strong confirmation"
-
-    return f"""
-{signal_emoji} BTC/USDT FUTURES ANALYSIS
-━━━━━━━━━━━━━━━━━━
-
-Exchange: XT
-Timeframe: 15m
-Price: {show(a['price'])} USDT
-
-📊 MULTI-TIMEFRAME
-━━━━━━━━━━━━━━━━━━
-15m: {a['trend_15m']}
-1h: {a['trend_1h']}
-4h: {a['trend_4h']}
-
-📈 TECHNICAL INDICATORS
-━━━━━━━━━━━━━━━━━━
-EMA20: {show(a['ema20'])}
-EMA50: {show(a['ema50'])}
-EMA200: {show(a['ema200'])}
-RSI: {show(a['rsi'])}
-MACD: {show(a['macd'])}
-MACD Signal: {show(a['macd_signal'])}
-ATR: {show(a['atr'])}
-Volume Ratio: {show(a['volume_ratio'])}
-
-🧠 SMART MONEY
-━━━━━━━━━━━━━━━━━━
-Bullish BOS: {a['bull_bos']}
-Bearish BOS: {a['bear_bos']}
-Bullish FVG: {a['bullish_fvg']}
-Bearish FVG: {a['bearish_fvg']}
-Bullish OB: {a['bullish_ob']}
-Bearish OB: {a['bearish_ob']}
-Sell-side Sweep: {a['bull_sweep']}
-Buy-side Sweep: {a['bear_sweep']}
-Market Zone: {a['zone']}
-
-🎯 SIGNAL SCORING
-━━━━━━━━━━━━━━━━━━
-LONG Score: {a['long_score']}
-SHORT Score: {a['short_score']}
-Algorithm Score: {a['confidence']}%
-
-🚦 FINAL RESULT
-━━━━━━━━━━━━━━━━━━
-Signal: {a['signal']}
-
-Entry: {show(a['entry'])}
-Stop Loss: {show(a['stop_loss'])}
-TP1: {show(a['tp1'])}
-TP2: {show(a['tp2'])}
-TP3: {show(a['tp3'])}
-
-📝 REASONS
-━━━━━━━━━━━━━━━━━━
-{reasons}
-
-━━━━━━━━━━━━━━━━━━
-Analysis only - No trade executed.
-Algorithm score is not a probability of profit.
-"""
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"balance": START_BALANCE, "positions": [], "history": [],
+            "last_signal": {}, "last_summary": 0}
 
 
-def send_error(message):
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendMessage"
-    )
+def save_state(s):
+    with open(STATE_FILE, "w") as f:
+        json.dump(s, f, indent=1)
 
-    requests.post(
-        url,
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": "BTC Bot Error:\n" + str(message)[:3000]
-        },
-        timeout=20
-    )
+
+def get_candles(symbol):
+    r = requests.get(f"{BASE}/future/market/v1/public/q/kline",
+                     params={"symbol": symbol, "interval": INTERVAL, "limit": 200},
+                     timeout=15)
+    r.raise_for_status()
+    data = r.json().get("result") or []
+    df = pd.DataFrame(data)
+    if df.empty:
+        return None
+    df = df.rename(columns={"o": "open", "h": "high", "l": "low",
+                            "c": "close", "v": "volume"})
+    for c in ["open", "high", "low", "close"]:
+        df[c] = df[c].astype(float)
+    df["t"] = df["t"].astype("int64")
+    return df.sort_values("t").reset_index(drop=True)
+
+
+def close_position(state, pos, exit_price, reason):
+    direction = 1 if pos["side"] == "LONG" else -1
+    pnl = (exit_price - pos["entry"]) / pos["entry"] * pos["notional"] * direction
+    pnl = max(pnl, -pos["margin"])  # حداکثر ضرر = مارجین (لیکوییدی)
+    fee = pos["notional"] * FEE
+    state["balance"] += pos["margin"] + pnl - fee
+    net = pnl - fee - pos["open_fee"]
+    state["history"].append({"symbol": pos["symbol"], "side": pos["side"],
+                             "net": round(net, 4), "reason": reason})
+    state["history"] = state["history"][-200:]
+    icon = "✅" if net > 0 else "❌"
+    tg(f"{icon} بسته شد: {pos['symbol'].upper()} {pos['side']}\n"
+       f"دلیل: {reason}\nورود: {pos['entry']} | خروج: {exit_price}\n"
+       f"سود/زیان خالص: {net:.3f} USDT\nموجودی: {state['balance']:.3f} USDT")
+
+
+def check_exits(state, candles):
+    remaining = []
+    for pos in state["positions"]:
+        df = candles.get(pos["symbol"])
+        if df is None:
+            remaining.append(pos)
+            continue
+        new = df[df["t"] > pos["after_t"]]
+        closed = False
+        for _, c in new.iterrows():
+            if pos["side"] == "LONG":
+                hit_sl, hit_tp = c["low"] <= pos["sl"], c["high"] >= pos["tp"]
+            else:
+                hit_sl, hit_tp = c["high"] >= pos["sl"], c["low"] <= pos["tp"]
+            if hit_sl:  # محافظه‌کارانه: اگر هر دو در یک کندل بودند، حد ضرر
+                close_position(state, pos, pos["sl"], "حد ضرر")
+                closed = True
+                break
+            if hit_tp:
+                close_position(state, pos, pos["tp"], "حد سود")
+                closed = True
+                break
+        if not closed:
+            remaining.append(pos)
+    state["positions"] = remaining
+
+
+def open_position(state, symbol, side, price, sig_t, last_t):
+    margin = min(MARGIN_PER_TRADE, state["balance"])
+    if margin < 0.5:
+        return
+    notional = margin * LEVERAGE
+    open_fee = notional * FEE
+    if state["balance"] < margin + open_fee:
+        return
+    state["balance"] -= margin + open_fee
+    if side == "LONG":
+        sl, tp = price * (1 - SL_PCT), price * (1 + TP_PCT)
+    else:
+        sl, tp = price * (1 + SL_PCT), price * (1 - TP_PCT)
+    state["positions"].append({
+        "symbol": symbol, "side": side, "entry": price,
+        "sl": round(sl, 8), "tp": round(tp, 8),
+        "margin": margin, "notional": notional, "open_fee": open_fee,
+        "after_t": last_t})
+    state["last_signal"][symbol] = sig_t
+    tg(f"🔔 پوزیشن جدید (شبیه‌سازی)\n{symbol.upper()} {side} x{LEVERAGE}\n"
+       f"ورود: {price}\nحد ضرر: {sl:.6g} | حد سود: {tp:.6g}\n"
+       f"مارجین: {margin} USDT | حجم: {notional} USDT")
+
+
+def summary(state, prices):
+    unreal = 0.0
+    lines = []
+    for p in state["positions"]:
+        cur = prices.get(p["symbol"], p["entry"])
+        d = 1 if p["side"] == "LONG" else -1
+        u = (cur - p["entry"]) / p["entry"] * p["notional"] * d
+        unreal += u + p["margin"]
+        lines.append(f"• {p['symbol'].upper()} {p['side']} ({u:+.3f})")
+    equity = state["balance"] + unreal
+    h = state["history"]
+    wins = sum(1 for x in h if x["net"] > 0)
+    tg(f"📊 گزارش\nارزش کل: {equity:.3f} USDT (شروع {START_BALANCE})\n"
+       f"معاملات بسته: {len(h)} | برد: {wins}\n"
+       f"پوزیشن باز: {len(state['positions'])}\n" + "\n".join(lines))
 
 
 def main():
-    print("BTC Futures Advanced Bot Started")
+    state = load_state()
+    now_ms = int(time.time() * 1000)
+    candles, prices = {}, {}
 
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise Exception("Telegram secrets are missing")
+    for sym in SYMBOLS:
+        try:
+            df = get_candles(sym)
+            if df is None:
+                print("no data:", sym)
+                continue
+            candles[sym] = df
+            prices[sym] = float(df["close"].iloc[-1])
+        except Exception as e:
+            print("error", sym, e)
 
-    try:
-        df_15m = get_market_data("15m")
-        df_1h = get_market_data("1h")
-        df_4h = get_market_data("4h")
+    print("symbols with data:", list(candles))
+    if not candles:
+        tg("⚠️ از XT هیچ دیتایی نگرفتم. آدرس API یا نام جفت‌ارزها را چک کنید.")
+        return
 
-        analysis = analyze_market(
-            df_15m,
-            df_1h,
-            df_4h
-        )
+    check_exits(state, candles)
 
-        print("Signal:", analysis["signal"])
-        print("LONG:", analysis["long_score"])
-        print("SHORT:", analysis["short_score"])
+    held = {p["symbol"] for p in state["positions"]}
+    for sym, df in candles.items():
+        if len(state["positions"]) >= MAX_POSITIONS:
+            break
+        if sym in held:
+            continue
+        closed = df[df["t"] + INTERVAL_MS <= now_ms].reset_index(drop=True)
+        sig = get_signal(closed)
+        if not sig:
+            continue
+        side, sig_t = sig
+        if state["last_signal"].get(sym) == sig_t:
+            continue
+        last_t = int(closed["t"].iloc[-1])
+        open_position(state, sym, side, prices[sym], sig_t, last_t)
 
-        chart_file = create_chart(
-            df_15m,
-            analysis
-        )
+    # گزارش دوره‌ای هر ۶ ساعت
+    if now_ms - state.get("last_summary", 0) > 6 * 3600 * 1000:
+        summary(state, prices)
+        state["last_summary"] = now_ms
 
-        report = build_report(analysis)
-
-        send_photo(chart_file, report)
-
-        print("Analysis and chart sent successfully")
-
-    except Exception as error:
-        print("BOT ERROR:", str(error))
-        send_error(error)
-        raise
+    save_state(state)
 
 
 if __name__ == "__main__":
