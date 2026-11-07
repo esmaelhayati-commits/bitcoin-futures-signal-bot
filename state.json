@@ -1,7 +1,45 @@
 {
- "balance": 10.0,
- "positions": [],
+ "balance": 3.928,
+ "positions": [
+  {
+   "symbol": "btc_usdt",
+   "side": "SHORT",
+   "entry": 75770.0,
+   "sl": 76906.55,
+   "tp": 73496.9,
+   "margin": 2.0,
+   "notional": 40.0,
+   "open_fee": 0.023999999999999997,
+   "after_t": 1794065400000
+  },
+  {
+   "symbol": "sol_usdt",
+   "side": "SHORT",
+   "entry": 89.49,
+   "sl": 90.83235,
+   "tp": 86.8053,
+   "margin": 2.0,
+   "notional": 40.0,
+   "open_fee": 0.023999999999999997,
+   "after_t": 1794065400000
+  },
+  {
+   "symbol": "doge_usdt",
+   "side": "SHORT",
+   "entry": 0.07157,
+   "sl": 0.07264355,
+   "tp": 0.0694229,
+   "margin": 2.0,
+   "notional": 40.0,
+   "open_fee": 0.023999999999999997,
+   "after_t": 1794065400000
+  }
+ ],
  "history": [],
- "last_signal": {},
+ "last_signal": {
+  "btc_usdt": 1794065100000,
+  "sol_usdt": 1794065400000,
+  "doge_usdt": 1794065400000
+ },
  "last_summary": 1794054080336
 }
