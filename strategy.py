@@ -2,7 +2,6 @@
 import pandas as pd
 import numpy as np
 
-
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -17,7 +16,6 @@ RSI_PERIOD = 14
 # ==========================================
 
 def calculate_rsi(series, period=RSI_PERIOD):
-
     delta = series.diff()
 
     gain = delta.clip(lower=0)
@@ -39,7 +37,6 @@ def calculate_rsi(series, period=RSI_PERIOD):
 
 
 def calculate_atr(df, period=ATR_PERIOD):
-
     high_low = df["high"] - df["low"]
 
     high_close = (
@@ -84,9 +81,7 @@ def prepare_data(df):
     ]
 
     if missing:
-        raise ValueError(
-            f"Missing columns: {missing}"
-        )
+        raise ValueError(f"Missing columns: {missing}")
 
     df = df.copy()
 
@@ -120,10 +115,7 @@ def prepare_data(df):
         adjust=False
     ).mean()
 
-    df["rsi"] = calculate_rsi(
-        df["close"]
-    )
-
+    df["rsi"] = calculate_rsi(df["close"])
     df["atr"] = calculate_atr(df)
 
     return df.dropna().reset_index(drop=True)
@@ -155,7 +147,7 @@ def get_trend(df):
 
 
 # ==========================================
-# MAIN ANALYSIS
+# MAIN STRATEGY
 # ==========================================
 
 def analyze_market(df_15m, df_1h, df_4h):
@@ -180,7 +172,6 @@ def analyze_market(df_15m, df_1h, df_4h):
     reasons = []
 
     # 15 MINUTES
-
     if trend_15m == "BULLISH":
         long_score += 3
         reasons.append("15m bullish trend")
@@ -190,7 +181,6 @@ def analyze_market(df_15m, df_1h, df_4h):
         reasons.append("15m bearish trend")
 
     # 1 HOUR
-
     if trend_1h == "BULLISH":
         long_score += 2
         reasons.append("1h bullish trend")
@@ -200,7 +190,6 @@ def analyze_market(df_15m, df_1h, df_4h):
         reasons.append("1h bearish trend")
 
     # 4 HOURS
-
     if trend_4h == "BULLISH":
         long_score += 2
         reasons.append("4h bullish trend")
@@ -210,7 +199,6 @@ def analyze_market(df_15m, df_1h, df_4h):
         reasons.append("4h bearish trend")
 
     # RSI
-
     if 50 < rsi < 70:
         long_score += 2
         reasons.append("RSI supports LONG")
@@ -220,15 +208,13 @@ def analyze_market(df_15m, df_1h, df_4h):
         reasons.append("RSI supports SHORT")
 
     # EMA CONFIRMATION
-
     if last["ema20"] > last["ema50"]:
         long_score += 1
 
     elif last["ema20"] < last["ema50"]:
         short_score += 1
 
-    # SIGNAL DECISION
-
+    # SIGNAL
     signal = "WAIT"
 
     if (
@@ -250,8 +236,7 @@ def analyze_market(df_15m, df_1h, df_4h):
         1
     )
 
-    # TRADE LEVELS
-
+    # ENTRY AND TARGETS
     entry = price
 
     stop_loss = None
@@ -275,16 +260,20 @@ def analyze_market(df_15m, df_1h, df_4h):
         tp2 = price - atr * 2.5
         tp3 = price - atr * 4
 
+    # UNIFIED OUTPUT
     return {
         "signal": signal,
         "side": signal,
 
         "entry": entry,
+        "entry_price": entry,
 
         "stop": stop_loss,
         "stop_loss": stop_loss,
 
         "target": tp1,
+        "take_profit": tp1,
+
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
@@ -311,22 +300,13 @@ def analyze_market(df_15m, df_1h, df_4h):
 
 def generate_signal(*args, **kwargs):
 
-    """
-    Supports:
-    generate_signal(df)
-    generate_signal(df15, df1h, df4h)
-    generate_signal(symbol, df15, df1h, df4h)
-    """
-
     frames = []
 
     for arg in args:
-
         if isinstance(arg, pd.DataFrame):
             frames.append(arg)
 
     for value in kwargs.values():
-
         if isinstance(value, pd.DataFrame):
             frames.append(value)
 
@@ -343,10 +323,8 @@ def generate_signal(*args, **kwargs):
         df_4h = frames[0]
 
     else:
-
         raise ValueError(
-            f"Invalid generate_signal arguments. "
-            f"Found {len(frames)} DataFrames."
+            f"Expected DataFrames, found {len(frames)}"
         )
 
     return analyze_market(
