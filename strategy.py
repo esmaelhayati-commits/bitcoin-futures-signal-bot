@@ -3,11 +3,21 @@ import pandas as pd
 import numpy as np
 
 
-# =====================================
-# INDICATORS
-# =====================================
+# ==========================================
+# CONFIGURATION
+# ==========================================
 
-def calculate_rsi(series, period=14):
+MIN_CANDLES = 200
+ATR_PERIOD = 14
+RSI_PERIOD = 14
+
+
+# ==========================================
+# INDICATORS
+# ==========================================
+
+def calculate_rsi(series, period=RSI_PERIOD):
+
     delta = series.diff()
 
     gain = delta.clip(lower=0)
@@ -28,7 +38,8 @@ def calculate_rsi(series, period=14):
     return (100 - (100 / (1 + rs))).fillna(50)
 
 
-def calculate_atr(df, period=14):
+def calculate_atr(df, period=ATR_PERIOD):
+
     high_low = df["high"] - df["low"]
 
     high_close = (
@@ -50,11 +61,14 @@ def calculate_atr(df, period=14):
     ).mean()
 
 
-# =====================================
-# PREPARE DATA
-# =====================================
+# ==========================================
+# DATA PREPARATION
+# ==========================================
 
 def prepare_data(df):
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
 
     required = [
         "open",
@@ -86,9 +100,9 @@ def prepare_data(df):
         subset=required
     ).reset_index(drop=True)
 
-    if len(df) < 200:
+    if len(df) < MIN_CANDLES:
         raise ValueError(
-            "At least 200 candles are required."
+            f"Need at least {MIN_CANDLES} candles"
         )
 
     df["ema20"] = df["close"].ewm(
@@ -115,9 +129,9 @@ def prepare_data(df):
     return df.dropna().reset_index(drop=True)
 
 
-# =====================================
+# ==========================================
 # TREND DETECTION
-# =====================================
+# ==========================================
 
 def get_trend(df):
 
@@ -140,21 +154,21 @@ def get_trend(df):
     return "SIDEWAYS"
 
 
-# =====================================
-# MAIN STRATEGY
-# =====================================
+# ==========================================
+# MAIN ANALYSIS
+# ==========================================
 
 def analyze_market(df_15m, df_1h, df_4h):
 
-    df_15m = prepare_data(df_15m)
-    df_1h = prepare_data(df_1h)
-    df_4h = prepare_data(df_4h)
+    data_15m = prepare_data(df_15m)
+    data_1h = prepare_data(df_1h)
+    data_4h = prepare_data(df_4h)
 
-    trend_15m = get_trend(df_15m)
-    trend_1h = get_trend(df_1h)
-    trend_4h = get_trend(df_4h)
+    trend_15m = get_trend(data_15m)
+    trend_1h = get_trend(data_1h)
+    trend_4h = get_trend(data_4h)
 
-    last = df_15m.iloc[-1]
+    last = data_15m.iloc[-1]
 
     price = float(last["close"])
     rsi = float(last["rsi"])
@@ -165,7 +179,7 @@ def analyze_market(df_15m, df_1h, df_4h):
 
     reasons = []
 
-    # 15 MIN TREND
+    # 15 MINUTES
 
     if trend_15m == "BULLISH":
         long_score += 3
@@ -175,7 +189,7 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 3
         reasons.append("15m bearish trend")
 
-    # 1 HOUR TREND
+    # 1 HOUR
 
     if trend_1h == "BULLISH":
         long_score += 2
@@ -185,7 +199,7 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 2
         reasons.append("1h bearish trend")
 
-    # 4 HOUR TREND
+    # 4 HOURS
 
     if trend_4h == "BULLISH":
         long_score += 2
@@ -213,7 +227,7 @@ def analyze_market(df_15m, df_1h, df_4h):
     elif last["ema20"] < last["ema50"]:
         short_score += 1
 
-    # SIGNAL
+    # SIGNAL DECISION
 
     signal = "WAIT"
 
@@ -236,77 +250,112 @@ def analyze_market(df_15m, df_1h, df_4h):
         1
     )
 
-    # ENTRY AND TARGETS
+    # TRADE LEVELS
 
     entry = price
-    stop_loss = None
 
+    stop_loss = None
     tp1 = None
     tp2 = None
     tp3 = None
 
     if signal == "LONG":
 
-        stop_loss = price - (atr * 1.5)
+        stop_loss = price - atr * 1.5
 
-        tp1 = price + (atr * 1.5)
-        tp2 = price + (atr * 2.5)
-        tp3 = price + (atr * 4)
+        tp1 = price + atr * 1.5
+        tp2 = price + atr * 2.5
+        tp3 = price + atr * 4
 
     elif signal == "SHORT":
 
-        stop_loss = price + (atr * 1.5)
+        stop_loss = price + atr * 1.5
 
-        tp1 = price - (atr * 1.5)
-        tp2 = price - (atr * 2.5)
-        tp3 = price - (atr * 4)
+        tp1 = price - atr * 1.5
+        tp2 = price - atr * 2.5
+        tp3 = price - atr * 4
 
     return {
         "signal": signal,
         "side": signal,
+
         "entry": entry,
+
         "stop": stop_loss,
         "stop_loss": stop_loss,
+
         "target": tp1,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
+
         "confidence": confidence,
+
         "long_score": long_score,
         "short_score": short_score,
+
         "trend_15m": trend_15m,
         "trend_1h": trend_1h,
         "trend_4h": trend_4h,
+
         "rsi": round(rsi, 2),
         "atr": round(atr, 6),
+
         "reasons": reasons
     }
 
 
-# =====================================
+# ==========================================
 # BACKTEST COMPATIBILITY
-# =====================================
+# ==========================================
 
-def generate_signal(df):
+def generate_signal(*args, **kwargs):
 
-    result = analyze_market(
-        df,
-        df,
-        df
+    """
+    Supports:
+    generate_signal(df)
+    generate_signal(df15, df1h, df4h)
+    generate_signal(symbol, df15, df1h, df4h)
+    """
+
+    frames = []
+
+    for arg in args:
+
+        if isinstance(arg, pd.DataFrame):
+            frames.append(arg)
+
+    for value in kwargs.values():
+
+        if isinstance(value, pd.DataFrame):
+            frames.append(value)
+
+    if len(frames) >= 3:
+
+        df_15m = frames[0]
+        df_1h = frames[1]
+        df_4h = frames[2]
+
+    elif len(frames) == 1:
+
+        df_15m = frames[0]
+        df_1h = frames[0]
+        df_4h = frames[0]
+
+    else:
+
+        raise ValueError(
+            f"Invalid generate_signal arguments. "
+            f"Found {len(frames)} DataFrames."
+        )
+
+    return analyze_market(
+        df_15m,
+        df_1h,
+        df_4h
     )
 
-    return {
-        "signal": result["signal"],
-        "side": result["side"],
-        "entry": result["entry"],
-        "stop": result["stop"],
-        "stop_loss": result["stop_loss"],
-        "target": result["target"],
-        "tp1": result["tp1"],
-        "tp2": result["tp2"],
-        "tp3": result["tp3"],
-        "confidence": result["confidence"],
-        "rsi": result["rsi"],
-        "long_score": result["long_score"],
-        "short_score": result["short_score"]
-    }
+
+# ==========================================
+# END
+# ==========================================
