@@ -5,11 +5,20 @@ import pandas as pd
 import requests
 
 from bot import (BASE, INTERVAL, INTERVAL_MS, SYMBOLS, START_BALANCE, LEVERAGE,
-                 MARGIN_PER_TRADE, MAX_POSITIONS, SL_PCT, TP_PCT, FEE, tg)
+                 MARGIN_PER_TRADE, MAX_POSITIONS, FEE, tg)
 from strategy import get_signal
 
 TARGET = int(os.environ.get("BT_CANDLES", "8000"))  # ~28 روز در کندل ۵ دقیقه
 WINDOW = 120
+
+# (اسم، دوره EMA برای فیلتر روند یا None، حد ضرر، حد سود)
+VARIANTS = [
+    ("۱) پایه (بدون فیلتر)", None, 0.015, 0.03),
+    ("۲) فیلتر روند EMA288 (~۱ روز)", 288, 0.015, 0.03),
+    ("۳) فیلتر روند EMA600 (~۲ روز)", 600, 0.015, 0.03),
+    ("۴) EMA600 + حد ضرر ۱٪ / سود ۲٪", 600, 0.010, 0.02),
+    ("۵) EMA600 + حد ضرر ۲٪ / سود ۴٪", 600, 0.020, 0.04),
+]
 
 
 def fetch_history(sym):
@@ -42,14 +51,28 @@ def fetch_history(sym):
     return df.tail(TARGET).reset_index(drop=True)
 
 
-def simulate(data):
+def precompute_signals(data):
+    """سیگنال هر کندل فقط یک بار حساب می‌شود و بین حالت‌ها مشترک است."""
+    sigs = {}
+    for s, df in data.items():
+        d = {}
+        for i in range(90, len(df)):
+            sig = get_signal(df.iloc[max(0, i - WINDOW + 1): i + 1].reset_index(drop=True))
+            if sig:
+                d[i] = sig
+        sigs[s] = d
+    return sigs
+
+
+def simulate(data, sigs, ema_span, sl_pct, tp_pct):
     balance = START_BALANCE
     positions, trades, last_signal = [], [], {}
     pos_idx = {s: {int(t): i for i, t in enumerate(d["t"])} for s, d in data.items()}
     times = sorted({int(t) for d in data.values() for t in d["t"]})
+    ema = {s: d["close"].ewm(span=ema_span, adjust=False).mean().values
+           for s, d in data.items()} if ema_span else None
 
     for ts in times:
-        # ۱) خروج
         remaining = []
         for p in positions:
             i = pos_idx[p["symbol"]].get(ts)
@@ -74,7 +97,6 @@ def simulate(data):
                            "net": pnl - fee - p["open_fee"], "t": ts})
         positions = remaining
 
-        # ۲) ورود
         held = {p["symbol"] for p in positions}
         for sym, df in data.items():
             if len(positions) >= MAX_POSITIONS:
@@ -82,65 +104,50 @@ def simulate(data):
             if sym in held:
                 continue
             i = pos_idx[sym].get(ts)
-            if i is None or i < 90:
+            if i is None:
                 continue
-            sig = get_signal(df.iloc[max(0, i - WINDOW + 1): i + 1].reset_index(drop=True))
+            sig = sigs[sym].get(i)
             if not sig:
                 continue
             side, sig_t = sig
             if last_signal.get(sym) == sig_t:
                 continue
+            price = float(df["close"].iloc[i])
+            if ema_span:
+                if i < ema_span:
+                    continue
+                e = ema[sym][i]
+                if (side == "LONG" and price <= e) or (side == "SHORT" and price >= e):
+                    continue
             margin = min(MARGIN_PER_TRADE, balance)
             notional = margin * LEVERAGE
             open_fee = notional * FEE
             if margin < 0.5 or balance < margin + open_fee:
                 continue
-            price = float(df["close"].iloc[i])
             balance -= margin + open_fee
-            sl = price * (1 - SL_PCT) if side == "LONG" else price * (1 + SL_PCT)
-            tp = price * (1 + TP_PCT) if side == "LONG" else price * (1 - TP_PCT)
+            sl = price * (1 - sl_pct) if side == "LONG" else price * (1 + sl_pct)
+            tp = price * (1 + tp_pct) if side == "LONG" else price * (1 - tp_pct)
             positions.append({"symbol": sym, "side": side, "entry": price, "sl": sl,
                               "tp": tp, "margin": margin, "notional": notional,
                               "open_fee": open_fee, "after_t": ts})
             last_signal[sym] = sig_t
-    return trades, balance, positions
+    return trades
 
 
-def report(trades, balance, open_pos, days):
-    n = len(trades)
+def stats(tr):
+    n = len(tr)
     if n == 0:
-        return f"🧪 بک‌تست ({days:.0f} روز): هیچ معامله بسته‌شده‌ای نبود."
-    wins = [t["net"] for t in trades if t["net"] > 0]
-    losses = [t["net"] for t in trades if t["net"] <= 0]
-    total = sum(t["net"] for t in trades)
-    pf = sum(wins) / abs(sum(losses)) if losses and sum(losses) != 0 else float("inf")
-    cum, peak, mdd = 0.0, 0.0, 0.0
-    for t in trades:
-        cum += t["net"]
-        peak = max(peak, cum)
-        mdd = max(mdd, peak - cum)
+        return "0 معامله"
+    wins = sum(t["net"] for t in tr if t["net"] > 0)
+    loss = -sum(t["net"] for t in tr if t["net"] <= 0)
+    pf = wins / loss if loss > 0 else float("inf")
+    wr = sum(t["net"] > 0 for t in tr) / n
+    total = sum(t["net"] for t in tr)
+    return f"{n} معامله | برد {wr:.0%} | {total:+.2f} | PF {pf:.2f}"
 
-    def side_line(side):
-        ts = [t["net"] for t in trades if t["side"] == side]
-        if not ts:
-            return f"{side}: -"
-        return f"{side}: {len(ts)} معامله، برد {sum(x > 0 for x in ts) / len(ts):.0%}، جمع {sum(ts):+.2f}"
 
-    by_sym = {}
-    for t in trades:
-        by_sym.setdefault(t["symbol"], []).append(t["net"])
-    sym_lines = [f"• {s.split('_')[0].upper()}: {len(v)} معامله، جمع {sum(v):+.2f}"
-                 for s, v in sorted(by_sym.items(), key=lambda x: -sum(x[1]))]
-
-    return (f"🧪 بک‌تست ({days:.0f} روز، کندل ۵ دقیقه)\n"
-            f"معاملات: {n} | نرخ برد: {len(wins) / n:.0%}\n"
-            f"سود خالص: {total:+.2f} USDT (از {START_BALANCE})\n"
-            f"میانگین سود: {sum(wins) / len(wins) if wins else 0:.3f} | "
-            f"میانگین زیان: {sum(losses) / len(losses) if losses else 0:.3f}\n"
-            f"ضریب سود (PF): {pf:.2f} | حداکثر افت: {mdd:.2f} USDT\n"
-            f"{side_line('LONG')}\n{side_line('SHORT')}\n"
-            + "\n".join(sym_lines)
-            + f"\nپوزیشن باز در پایان: {len(open_pos)}")
+def side_sum(tr, side):
+    return sum(t["net"] for t in tr if t["side"] == side)
 
 
 def main():
@@ -148,7 +155,7 @@ def main():
     for s in SYMBOLS:
         try:
             df = fetch_history(s)
-            if df is not None and len(df) > 100:
+            if df is not None and len(df) > 700:
                 data[s] = df
                 print(s, len(df), "candles")
             else:
@@ -158,9 +165,24 @@ def main():
     if not data:
         tg("⚠️ بک‌تست: دیتایی از XT نگرفتم.")
         return
+
     days = min(len(d) for d in data.values()) * 5 / 1440
-    trades, balance, open_pos = simulate(data)
-    msg = report(trades, balance, open_pos, days)
+    sigs = precompute_signals(data)
+    all_t = sorted({int(t) for d in data.values() for t in d["t"]})
+    mid = all_t[len(all_t) // 2]
+
+    parts = [f"🧪 مقایسه استراتژی‌ها ({days:.0f} روز، کندل ۵ دقیقه)",
+             "سود خالص به USDT. PF بالای ۱ یعنی سودده."]
+    for name, ema_span, sl, tp in VARIANTS:
+        tr = simulate(data, sigs, ema_span, sl, tp)
+        h1 = [t for t in tr if t["t"] < mid]
+        h2 = [t for t in tr if t["t"] >= mid]
+        parts.append(f"\n{name}\n"
+                     f"کل: {stats(tr)}\n"
+                     f"نیمه اول: {stats(h1)}\n"
+                     f"نیمه دوم: {stats(h2)}\n"
+                     f"LONG {side_sum(tr, 'LONG'):+.2f} | SHORT {side_sum(tr, 'SHORT'):+.2f}")
+    msg = "\n".join(parts)
     print(msg)
     tg(msg)
 
