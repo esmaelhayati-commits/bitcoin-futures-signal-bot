@@ -1,19 +1,42 @@
+
 name: backtest
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: python backtest_htf.py
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backtest
+        run: python backtest_htf.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Upload backtest reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: |
+            backtest_report.json
+            backtest_trades.csv
+          if-no-files-found: warn
+          retention-days: 30
