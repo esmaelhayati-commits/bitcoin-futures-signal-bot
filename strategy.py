@@ -1,19 +1,10 @@
-
 import pandas as pd
 import numpy as np
-
-# ==========================================
-# CONFIGURATION
-# ==========================================
 
 MIN_CANDLES = 200
 ATR_PERIOD = 14
 RSI_PERIOD = 14
 
-
-# ==========================================
-# INDICATORS
-# ==========================================
 
 def calculate_rsi(series, period=RSI_PERIOD):
     delta = series.diff()
@@ -33,7 +24,7 @@ def calculate_rsi(series, period=RSI_PERIOD):
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
 
-    return (100 - (100 / (1 + rs))).fillna(50)
+    return (100 - 100 / (1 + rs)).fillna(50)
 
 
 def calculate_atr(df, period=ATR_PERIOD):
@@ -58,21 +49,12 @@ def calculate_atr(df, period=ATR_PERIOD):
     ).mean()
 
 
-# ==========================================
-# DATA PREPARATION
-# ==========================================
-
 def prepare_data(df):
-
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a pandas DataFrame")
 
     required = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume"
+        "open", "high", "low", "close", "volume"
     ]
 
     missing = [
@@ -83,50 +65,59 @@ def prepare_data(df):
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    df = df.copy()
+    data = df.copy()
 
     for col in required:
-        df[col] = pd.to_numeric(
-            df[col],
+        data[col] = pd.to_numeric(
+            data[col],
             errors="coerce"
         )
 
-    df = df.dropna(
-        subset=required
-    ).reset_index(drop=True)
+    data = data.dropna(subset=required)
 
-    if len(df) < MIN_CANDLES:
+    if len(data) < MIN_CANDLES:
         raise ValueError(
-            f"Need at least {MIN_CANDLES} candles"
+            f"Need at least {MIN_CANDLES} candles; "
+            f"received {len(data)}"
         )
 
-    df["ema20"] = df["close"].ewm(
+    data["ema20"] = data["close"].ewm(
         span=20,
         adjust=False
     ).mean()
 
-    df["ema50"] = df["close"].ewm(
+    data["ema50"] = data["close"].ewm(
         span=50,
         adjust=False
     ).mean()
 
-    df["ema200"] = df["close"].ewm(
+    data["ema200"] = data["close"].ewm(
         span=200,
         adjust=False
     ).mean()
 
-    df["rsi"] = calculate_rsi(df["close"])
-    df["atr"] = calculate_atr(df)
+    data["rsi"] = calculate_rsi(data["close"])
+    data["atr"] = calculate_atr(data)
 
-    return df.dropna().reset_index(drop=True)
+    data = data.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
 
+    data = data.dropna(
+        subset=[
+            "ema20",
+            "ema50",
+            "ema200",
+            "rsi",
+            "atr"
+        ]
+    )
 
-# ==========================================
-# TREND DETECTION
-# ==========================================
+    return data
+
 
 def get_trend(df):
-
     last = df.iloc[-1]
 
     if (
@@ -146,10 +137,6 @@ def get_trend(df):
     return "SIDEWAYS"
 
 
-# ==========================================
-# MAIN STRATEGY
-# ==========================================
-
 def analyze_market(df_15m, df_1h, df_4h):
 
     data_15m = prepare_data(df_15m)
@@ -168,10 +155,9 @@ def analyze_market(df_15m, df_1h, df_4h):
 
     long_score = 0
     short_score = 0
-
     reasons = []
 
-    # 15 MINUTES
+    # 15m trend
     if trend_15m == "BULLISH":
         long_score += 3
         reasons.append("15m bullish trend")
@@ -180,7 +166,7 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 3
         reasons.append("15m bearish trend")
 
-    # 1 HOUR
+    # 1h trend
     if trend_1h == "BULLISH":
         long_score += 2
         reasons.append("1h bullish trend")
@@ -189,7 +175,7 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 2
         reasons.append("1h bearish trend")
 
-    # 4 HOURS
+    # 4h trend
     if trend_4h == "BULLISH":
         long_score += 2
         reasons.append("4h bullish trend")
@@ -207,14 +193,14 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 2
         reasons.append("RSI supports SHORT")
 
-    # EMA CONFIRMATION
+    # EMA confirmation
     if last["ema20"] > last["ema50"]:
         long_score += 1
 
     elif last["ema20"] < last["ema50"]:
         short_score += 1
 
-    # SIGNAL
+    # Signal decision
     signal = "WAIT"
 
     if (
@@ -236,7 +222,7 @@ def analyze_market(df_15m, df_1h, df_4h):
         1
     )
 
-    # ENTRY AND TARGETS
+    # Entry and targets
     entry = price
 
     stop_loss = None
@@ -245,22 +231,17 @@ def analyze_market(df_15m, df_1h, df_4h):
     tp3 = None
 
     if signal == "LONG":
-
         stop_loss = price - atr * 1.5
-
         tp1 = price + atr * 1.5
         tp2 = price + atr * 2.5
         tp3 = price + atr * 4
 
     elif signal == "SHORT":
-
         stop_loss = price + atr * 1.5
-
         tp1 = price - atr * 1.5
         tp2 = price - atr * 2.5
         tp3 = price - atr * 4
 
-    # UNIFIED OUTPUT
     return {
         "signal": signal,
         "side": signal,
@@ -288,52 +269,34 @@ def analyze_market(df_15m, df_1h, df_4h):
         "trend_4h": trend_4h,
 
         "rsi": round(rsi, 2),
-        "atr": round(atr, 6),
+        "atr": round(atr, 8),
 
         "reasons": reasons
     }
 
 
-# ==========================================
-# BACKTEST COMPATIBILITY
-# ==========================================
+def generate_signal(
+    df_15m,
+    df_1h,
+    df_4h,
+    symbol=None
+):
+    """
+    Compatible with backtest.py:
+    generate_signal(history15, history1, history4, symbol)
+    """
 
-def generate_signal(*args, **kwargs):
+    if not isinstance(df_15m, pd.DataFrame):
+        raise TypeError("15m data must be a DataFrame")
 
-    frames = []
+    if not isinstance(df_1h, pd.DataFrame):
+        raise TypeError("1h data must be a DataFrame")
 
-    for arg in args:
-        if isinstance(arg, pd.DataFrame):
-            frames.append(arg)
-
-    for value in kwargs.values():
-        if isinstance(value, pd.DataFrame):
-            frames.append(value)
-
-    if len(frames) >= 3:
-
-        df_15m = frames[0]
-        df_1h = frames[1]
-        df_4h = frames[2]
-
-    elif len(frames) == 1:
-
-        df_15m = frames[0]
-        df_1h = frames[0]
-        df_4h = frames[0]
-
-    else:
-        raise ValueError(
-            f"Expected DataFrames, found {len(frames)}"
-        )
+    if not isinstance(df_4h, pd.DataFrame):
+        raise TypeError("4h data must be a DataFrame")
 
     return analyze_market(
         df_15m,
         df_1h,
         df_4h
     )
-
-
-# ==========================================
-# END
-# ==========================================
