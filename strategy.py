@@ -3,6 +3,10 @@ import pandas as pd
 import numpy as np
 
 
+# =====================================
+# INDICATORS
+# =====================================
+
 def calculate_rsi(series, period=14):
     delta = series.diff()
 
@@ -46,8 +50,46 @@ def calculate_atr(df, period=14):
     ).mean()
 
 
+# =====================================
+# PREPARE DATA
+# =====================================
+
 def prepare_data(df):
+
+    required = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]
+
+    missing = [
+        col for col in required
+        if col not in df.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            f"Missing columns: {missing}"
+        )
+
     df = df.copy()
+
+    for col in required:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    df = df.dropna(
+        subset=required
+    ).reset_index(drop=True)
+
+    if len(df) < 200:
+        raise ValueError(
+            "At least 200 candles are required."
+        )
 
     df["ema20"] = df["close"].ewm(
         span=20,
@@ -64,14 +106,21 @@ def prepare_data(df):
         adjust=False
     ).mean()
 
-    df["rsi"] = calculate_rsi(df["close"])
+    df["rsi"] = calculate_rsi(
+        df["close"]
+    )
 
     df["atr"] = calculate_atr(df)
 
     return df.dropna().reset_index(drop=True)
 
 
+# =====================================
+# TREND DETECTION
+# =====================================
+
 def get_trend(df):
+
     last = df.iloc[-1]
 
     if (
@@ -91,18 +140,15 @@ def get_trend(df):
     return "SIDEWAYS"
 
 
+# =====================================
+# MAIN STRATEGY
+# =====================================
+
 def analyze_market(df_15m, df_1h, df_4h):
 
     df_15m = prepare_data(df_15m)
     df_1h = prepare_data(df_1h)
     df_4h = prepare_data(df_4h)
-
-    if min(
-        len(df_15m),
-        len(df_1h),
-        len(df_4h)
-    ) < 5:
-        raise ValueError("Insufficient market data")
 
     trend_15m = get_trend(df_15m)
     trend_1h = get_trend(df_1h)
@@ -119,7 +165,8 @@ def analyze_market(df_15m, df_1h, df_4h):
 
     reasons = []
 
-    # تایم فریم اصلی
+    # 15 MIN TREND
+
     if trend_15m == "BULLISH":
         long_score += 3
         reasons.append("15m bullish trend")
@@ -128,21 +175,28 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 3
         reasons.append("15m bearish trend")
 
-    # تایم فریم یک ساعته
+    # 1 HOUR TREND
+
     if trend_1h == "BULLISH":
         long_score += 2
+        reasons.append("1h bullish trend")
 
     elif trend_1h == "BEARISH":
         short_score += 2
+        reasons.append("1h bearish trend")
 
-    # تایم فریم چهار ساعته
+    # 4 HOUR TREND
+
     if trend_4h == "BULLISH":
         long_score += 2
+        reasons.append("4h bullish trend")
 
     elif trend_4h == "BEARISH":
         short_score += 2
+        reasons.append("4h bearish trend")
 
     # RSI
+
     if 50 < rsi < 70:
         long_score += 2
         reasons.append("RSI supports LONG")
@@ -151,22 +205,15 @@ def analyze_market(df_15m, df_1h, df_4h):
         short_score += 2
         reasons.append("RSI supports SHORT")
 
-    # EMA confirmation
+    # EMA CONFIRMATION
+
     if last["ema20"] > last["ema50"]:
         long_score += 1
 
     elif last["ema20"] < last["ema50"]:
         short_score += 1
 
-    total_score = long_score + short_score
-
-    if total_score:
-        confidence = round(
-            max(long_score, short_score) / 10 * 100,
-            1
-        )
-    else:
-        confidence = 0
+    # SIGNAL
 
     signal = "WAIT"
 
@@ -184,34 +231,43 @@ def analyze_market(df_15m, df_1h, df_4h):
     ):
         signal = "SHORT"
 
+    confidence = round(
+        max(long_score, short_score) / 10 * 100,
+        1
+    )
+
+    # ENTRY AND TARGETS
+
     entry = price
     stop_loss = None
+
     tp1 = None
     tp2 = None
     tp3 = None
 
     if signal == "LONG":
+
         stop_loss = price - (atr * 1.5)
+
         tp1 = price + (atr * 1.5)
         tp2 = price + (atr * 2.5)
         tp3 = price + (atr * 4)
 
     elif signal == "SHORT":
+
         stop_loss = price + (atr * 1.5)
+
         tp1 = price - (atr * 1.5)
         tp2 = price - (atr * 2.5)
         tp3 = price - (atr * 4)
 
-    if signal == "WAIT":
-        confidence = round(
-            max(long_score, short_score) / 10 * 100,
-            1
-        )
-
     return {
         "signal": signal,
+        "side": signal,
         "entry": entry,
+        "stop": stop_loss,
         "stop_loss": stop_loss,
+        "target": tp1,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
@@ -224,4 +280,33 @@ def analyze_market(df_15m, df_1h, df_4h):
         "rsi": round(rsi, 2),
         "atr": round(atr, 6),
         "reasons": reasons
+    }
+
+
+# =====================================
+# BACKTEST COMPATIBILITY
+# =====================================
+
+def generate_signal(df):
+
+    result = analyze_market(
+        df,
+        df,
+        df
+    )
+
+    return {
+        "signal": result["signal"],
+        "side": result["side"],
+        "entry": result["entry"],
+        "stop": result["stop"],
+        "stop_loss": result["stop_loss"],
+        "target": result["target"],
+        "tp1": result["tp1"],
+        "tp2": result["tp2"],
+        "tp3": result["tp3"],
+        "confidence": result["confidence"],
+        "rsi": result["rsi"],
+        "long_score": result["long_score"],
+        "short_score": result["short_score"]
     }
