@@ -5,15 +5,14 @@ import json
 import time
 
 from datetime import datetime, timezone
-
 from strategy import generate_signal
 
 
 # ==========================================
-# FUTURES BOT V2.1 - BACKTEST ENGINE
-# Exchange: XT
-# Initial equity: 10 USDT
-# Leverage: 20x
+# FUTURES BOT V2.2 - BACKTEST ONLY
+# XT USDT swaps
+# 15m entries | 1h/4h confirmation
+# NO LIVE ORDERS
 # ==========================================
 
 INITIAL_BALANCE = 10.0
@@ -29,10 +28,13 @@ SLIPPAGE_RATE = 0.0005
 LOOKBACK_DAYS = 90
 CANDLE_LIMIT = 500
 
+TIMEFRAME_MS = 15 * 60 * 1000
+
 REPORT_FILE = "backtest_report.json"
 TRADES_FILE = "backtest_trades.csv"
 
-SYMBOLS = [
+
+REQUESTED_SYMBOLS = [
     "BTC/USDT",
     "ETH/USDT",
     "SOL/USDT",
@@ -45,6 +47,7 @@ SYMBOLS = [
     "LTC/USDT"
 ]
 
+
 exchange = ccxt.xt({
     "enableRateLimit": True,
     "timeout": 30000,
@@ -56,21 +59,24 @@ exchange = ccxt.xt({
 
 def log(message):
     print(
-        f"[{datetime.now(timezone.utc).isoformat()}] "
-        f"{message}"
+        f"[{datetime.now(timezone.utc).isoformat()}] {message}"
     )
 
 
 def resolve_swap_symbol(requested, markets):
+
     base, quote = requested.split("/")
 
     for market in markets.values():
+
         if (
             market.get("base") == base
             and market.get("quote") == quote
             and market.get("swap")
             and market.get("active", True)
+            and market.get("settle") in (quote, None)
         ):
+
             return market["symbol"]
 
     return None
@@ -78,8 +84,9 @@ def resolve_swap_symbol(requested, markets):
 
 def fetch_history(symbol):
 
-    since = exchange.milliseconds() - (
-        LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+    since = (
+        exchange.milliseconds()
+        - LOOKBACK_DAYS * 24 * 60 * 60 * 1000
     )
 
     all_candles = []
@@ -87,7 +94,9 @@ def fetch_history(symbol):
     log(f"Downloading {symbol}")
 
     while True:
+
         try:
+
             batch = exchange.fetch_ohlcv(
                 symbol,
                 timeframe="15m",
@@ -96,6 +105,7 @@ def fetch_history(symbol):
             )
 
         except Exception as exc:
+
             log(f"Download error {symbol}: {exc}")
             break
 
@@ -104,9 +114,7 @@ def fetch_history(symbol):
 
         all_candles.extend(batch)
 
-        last_timestamp = batch[-1][0]
-
-        next_since = last_timestamp + 15 * 60 * 1000
+        next_since = batch[-1][0] + TIMEFRAME_MS
 
         if next_since <= since:
             break
@@ -116,7 +124,9 @@ def fetch_history(symbol):
         if len(batch) < CANDLE_LIMIT:
             break
 
-        time.sleep(exchange.rateLimit / 1000)
+        time.sleep(
+            max(exchange.rateLimit, 250) / 1000
+        )
 
     if not all_candles:
         return None
@@ -149,7 +159,12 @@ def fetch_history(symbol):
         ["open", "high", "low", "close", "volume"]
     ].astype(float)
 
-    # Remove currently forming 15m candles.
+    df = df.replace(
+        [np.inf, -np.inf],
+        np.nan
+    ).dropna()
+
+    # Remove current unfinished 15m candle
     now = pd.Timestamp.now(tz="UTC")
 
     df = df[
@@ -157,19 +172,26 @@ def fetch_history(symbol):
     ]
 
     if len(df) < 1000:
-        log(f"Insufficient history for {symbol}")
+
+        log(
+            f"Insufficient history for {symbol}: "
+            f"{len(df)} candles"
+        )
+
         return None
 
     return df
 
 
-def resample_ohlcv(df, timeframe):
+def resample_ohlcv(df, timeframe, expected_bars):
 
-    result = df.resample(
+    grouped = df.resample(
         timeframe,
         label="right",
         closed="left"
-    ).agg({
+    )
+
+    result = grouped.agg({
         "open": "first",
         "high": "max",
         "low": "min",
@@ -177,31 +199,143 @@ def resample_ohlcv(df, timeframe):
         "volume": "sum"
     })
 
-    return result.dropna()
+    counts = grouped["close"].count()
+
+    # Exclude incomplete higher-timeframe candles
+    return result[
+        counts == expected_bars
+    ].dropna()
+
+
+def prepare_market_data():
+
+    log("Loading XT swap markets")
+
+    exchange.load_markets()
+
+    market_data = {}
+
+    for requested in REQUESTED_SYMBOLS:
+
+        symbol = resolve_swap_symbol(
+            requested,
+            exchange.markets
+        )
+
+        if not symbol:
+
+            log(
+                f"Swap market not found: {requested}"
+            )
+
+            continue
+
+        df15 = fetch_history(symbol)
+
+        if df15 is None:
+            continue
+
+        df1 = resample_ohlcv(
+            df15,
+            "1h",
+            4
+        )
+
+        df4 = resample_ohlcv(
+            df15,
+            "4h",
+            16
+        )
+
+        if min(len(df1), len(df4)) < 210:
+
+            log(
+                f"Insufficient higher timeframe history: {symbol}"
+            )
+
+            continue
+
+        market_data[symbol] = {
+            "15m": df15,
+            "1h": df1,
+            "4h": df4
+        }
+
+        log(
+            f"READY {symbol}: "
+            f"15m={len(df15)}, "
+            f"1h={len(df1)}, "
+            f"4h={len(df4)}"
+        )
+
+    return market_data
+
+
+def unrealized_pnl(position, price):
+
+    if position["side"] == "LONG":
+
+        return (
+            price - position["entry"]
+        ) * position["quantity"]
+
+    return (
+        position["entry"] - price
+    ) * position["quantity"]
 
 
 def equity_value(balance, positions, prices):
 
     total = balance
 
-    for position in positions.values():
+    for symbol, position in positions.items():
 
-        price = prices.get(
-            position["symbol"],
-            position["entry"]
+        total += unrealized_pnl(
+            position,
+            prices.get(symbol, position["entry"])
         )
 
-        if position["side"] == "LONG":
-            pnl = (
-                price - position["entry"]
-            ) * position["quantity"]
+    return total
+
+
+def adverse_equity(
+    balance,
+    positions,
+    market_data,
+    timestamp,
+    prices
+):
+
+    # Intrabar adverse estimate:
+    # low for LONG and high for SHORT
+
+    total = balance
+
+    for symbol, position in positions.items():
+
+        df = market_data[symbol]["15m"]
+
+        if timestamp in df.index:
+
+            candle = df.loc[timestamp]
+
+            mark = float(
+                candle["low"]
+                if position["side"] == "LONG"
+                else candle["high"]
+            )
 
         else:
-            pnl = (
-                position["entry"] - price
-            ) * position["quantity"]
 
-        total += pnl
+            mark = prices.get(
+                symbol,
+                position["entry"]
+            )
+
+        total += unrealized_pnl(
+            position,
+            mark
+        )
 
     return total
 
@@ -209,8 +343,8 @@ def equity_value(balance, positions, prices):
 def margin_used(positions):
 
     return sum(
-        position["margin"]
-        for position in positions.values()
+        p["margin"]
+        for p in positions.values()
     )
 
 
@@ -227,11 +361,13 @@ def close_position(
     entry = position["entry"]
 
     if side == "LONG":
+
         gross_pnl = (
             exit_price - entry
         ) * quantity
 
     else:
+
         gross_pnl = (
             entry - exit_price
         ) * quantity
@@ -240,7 +376,6 @@ def close_position(
         exit_price * quantity * FEE_RATE
     )
 
-    # Entry fee was deducted at entry.
     balance += gross_pnl - exit_fee
 
     net_pnl = (
@@ -250,26 +385,49 @@ def close_position(
     )
 
     trade = {
+
         "symbol": position["symbol"],
+
         "side": side,
 
         "entry_time": position["entry_time"],
+
         "exit_time": timestamp.isoformat(),
 
         "entry": round(entry, 10),
+
         "exit": round(exit_price, 10),
 
-        "stop_loss": position["stop_loss"],
-        "take_profit": position["take_profit"],
+        "stop_loss": round(
+            position["stop_loss"], 10
+        ),
+
+        "take_profit": round(
+            position["take_profit"], 10
+        ),
 
         "quantity": round(quantity, 10),
-        "margin": round(position["margin"], 6),
 
-        "gross_pnl": round(gross_pnl, 6),
-        "entry_fee": round(position["entry_fee"], 6),
-        "exit_fee": round(exit_fee, 6),
+        "margin": round(
+            position["margin"], 6
+        ),
 
-        "net_pnl": round(net_pnl, 6),
+        "gross_pnl": round(
+            gross_pnl, 6
+        ),
+
+        "entry_fee": round(
+            position["entry_fee"], 6
+        ),
+
+        "exit_fee": round(
+            exit_fee, 6
+        ),
+
+        "net_pnl": round(
+            net_pnl, 6
+        ),
+
         "reason": reason
     }
 
@@ -292,9 +450,13 @@ def check_exit(position, candle):
         stop_hit = low <= stop
         target_hit = high >= target
 
-        # Conservative assumption if both are touched.
+        # If both are hit, assume stop first
         if stop_hit:
-            raw_exit = min(open_price, stop)
+
+            raw_exit = min(
+                open_price,
+                stop
+            )
 
             return (
                 raw_exit * (1 - SLIPPAGE_RATE),
@@ -302,7 +464,11 @@ def check_exit(position, candle):
             )
 
         if target_hit:
-            raw_exit = max(open_price, target)
+
+            raw_exit = max(
+                open_price,
+                target
+            )
 
             return (
                 raw_exit * (1 - SLIPPAGE_RATE),
@@ -315,7 +481,11 @@ def check_exit(position, candle):
         target_hit = low <= target
 
         if stop_hit:
-            raw_exit = max(open_price, stop)
+
+            raw_exit = max(
+                open_price,
+                stop
+            )
 
             return (
                 raw_exit * (1 + SLIPPAGE_RATE),
@@ -323,7 +493,11 @@ def check_exit(position, candle):
             )
 
         if target_hit:
-            raw_exit = min(open_price, target)
+
+            raw_exit = min(
+                open_price,
+                target
+            )
 
             return (
                 raw_exit * (1 + SLIPPAGE_RATE),
@@ -346,7 +520,7 @@ def open_position(
 
     side = signal.get("signal")
 
-    if side not in ("LONG", "SHORT"):
+    if side not in ("LONG", "SHORT") or equity <= 0:
         return balance
 
     raw_entry = float(candle["open"])
@@ -354,48 +528,79 @@ def open_position(
     if not np.isfinite(raw_entry) or raw_entry <= 0:
         return balance
 
+    # Apply entry slippage
     if side == "LONG":
-        entry = raw_entry * (1 + SLIPPAGE_RATE)
+
+        entry = raw_entry * (
+            1 + SLIPPAGE_RATE
+        )
+
     else:
-        entry = raw_entry * (1 - SLIPPAGE_RATE)
+
+        entry = raw_entry * (
+            1 - SLIPPAGE_RATE
+        )
 
     try:
-        stop = float(signal["stop_loss"])
-        target = float(signal["take_profit"])
+
+        atr = float(signal["atr"])
 
     except (KeyError, TypeError, ValueError):
-        log(f"Invalid stop/target: {symbol}")
+
+        log(f"Missing ATR in signal: {symbol}")
         return balance
 
-    if not np.isfinite(stop) or not np.isfinite(target):
+    if not np.isfinite(atr) or atr <= 0:
         return balance
+
+    # Recalculate SL and TP from actual fill price
+    stop_distance = 1.5 * atr
+    target_distance = 3.0 * atr
 
     if side == "LONG":
-        if not (stop < entry < target):
-            log(f"Invalid LONG levels: {symbol}")
-            return balance
 
-        stop_distance = entry - stop
+        stop = entry - stop_distance
+        target = entry + target_distance
+
+        estimated_exit = (
+            stop * (1 - SLIPPAGE_RATE)
+        )
 
     else:
-        if not (target < entry < stop):
-            log(f"Invalid SHORT levels: {symbol}")
-            return balance
 
-        stop_distance = stop - entry
+        stop = entry + stop_distance
+        target = entry - target_distance
 
-    if stop_distance <= 0 or equity <= 0:
+        estimated_exit = (
+            stop * (1 + SLIPPAGE_RATE)
+        )
+
+    # Include estimated entry and exit fees in risk sizing
+    estimated_cost_per_unit = (
+        entry * FEE_RATE
+        + estimated_exit * FEE_RATE
+    )
+
+    estimated_loss_per_unit = (
+        stop_distance
+        + estimated_cost_per_unit
+    )
+
+    if estimated_loss_per_unit <= 0:
         return balance
 
-    # Risk-based position sizing.
     risk_amount = equity * RISK_PER_TRADE
 
-    quantity = risk_amount / stop_distance
+    quantity_by_risk = (
+        risk_amount / estimated_loss_per_unit
+    )
 
-    max_margin = equity * MAX_MARGIN_FRACTION
+    max_margin = (
+        equity * MAX_MARGIN_FRACTION
+    )
 
     available_margin = max(
-        0,
+        0.0,
         equity - margin_used(positions)
     )
 
@@ -404,10 +609,12 @@ def open_position(
         available_margin
     )
 
-    max_notional = allowed_margin * LEVERAGE
+    max_notional = (
+        allowed_margin * LEVERAGE
+    )
 
     quantity = min(
-        quantity,
+        quantity_by_risk,
         max_notional / entry
     )
 
@@ -415,6 +622,7 @@ def open_position(
         return balance
 
     notional = quantity * entry
+
     margin = notional / LEVERAGE
 
     entry_fee = notional * FEE_RATE
@@ -425,16 +633,21 @@ def open_position(
     balance -= entry_fee
 
     positions[symbol] = {
+
         "symbol": symbol,
+
         "side": side,
 
         "entry": entry,
+
         "quantity": quantity,
 
         "stop_loss": stop,
+
         "take_profit": target,
 
         "margin": margin,
+
         "entry_fee": entry_fee,
 
         "entry_time": timestamp.isoformat()
@@ -447,53 +660,141 @@ def open_position(
         f"entry={entry:.8f} "
         f"SL={stop:.8f} "
         f"TP={target:.8f} "
+        f"qty={quantity:.8f} "
         f"margin={margin:.4f}"
     )
 
     return balance
 
 
-def prepare_market_data():
+def _profit_factor(items):
 
-    log("Loading XT markets")
+    profits = sum(
+        t["net_pnl"]
+        for t in items
+        if t["net_pnl"] > 0
+    )
 
-    exchange.load_markets()
+    losses = abs(sum(
+        t["net_pnl"]
+        for t in items
+        if t["net_pnl"] <= 0
+    ))
 
-    market_data = {}
+    return (
+        round(profits / losses, 4)
+        if losses > 0
+        else None
+    )
 
-    for requested in SYMBOLS:
 
-        symbol = resolve_swap_symbol(
-            requested,
-            exchange.markets
-        )
+def summarize_trades(trades):
 
-        if not symbol:
-            log(f"Swap market not found: {requested}")
-            continue
+    winners = [
+        t for t in trades
+        if t["net_pnl"] > 0
+    ]
 
-        df = fetch_history(symbol)
+    losers = [
+        t for t in trades
+        if t["net_pnl"] <= 0
+    ]
 
-        if df is None:
-            continue
+    def side_stats(side):
 
-        df_1h = resample_ohlcv(df, "1h")
-        df_4h = resample_ohlcv(df, "4h")
+        items = [
+            t for t in trades
+            if t["side"] == side
+        ]
 
-        market_data[symbol] = {
-            "15m": df,
-            "1h": df_1h,
-            "4h": df_4h
+        return {
+
+            "trades": len(items),
+
+            "wins": sum(
+                t["net_pnl"] > 0
+                for t in items
+            ),
+
+            "net_pnl": round(
+                sum(t["net_pnl"] for t in items),
+                6
+            ),
+
+            "profit_factor": _profit_factor(items)
         }
 
-        log(
-            f"READY {symbol}: "
-            f"15m={len(df)}, "
-            f"1h={len(df_1h)}, "
-            f"4h={len(df_4h)}"
-        )
+    by_symbol = {}
 
-    return market_data
+    for symbol in sorted(
+        set(t["symbol"] for t in trades)
+    ):
+
+        items = [
+            t for t in trades
+            if t["symbol"] == symbol
+        ]
+
+        by_symbol[symbol] = {
+
+            "trades": len(items),
+
+            "wins": sum(
+                t["net_pnl"] > 0
+                for t in items
+            ),
+
+            "net_pnl": round(
+                sum(t["net_pnl"] for t in items),
+                6
+            ),
+
+            "profit_factor": _profit_factor(items)
+        }
+
+    gross_profit = sum(
+        t["net_pnl"] for t in winners
+    )
+
+    gross_loss = abs(sum(
+        t["net_pnl"] for t in losers
+    ))
+
+    return {
+
+        "closed_trades": len(trades),
+
+        "wins": len(winners),
+
+        "losses": len(losers),
+
+        "win_rate_percent": (
+            round(
+                100 * len(winners) / len(trades),
+                2
+            )
+            if trades else 0
+        ),
+
+        "profit_factor": (
+            round(gross_profit / gross_loss, 4)
+            if gross_loss else None
+        ),
+
+        "gross_profit_net": round(
+            gross_profit, 6
+        ),
+
+        "gross_loss_net": round(
+            gross_loss, 6
+        ),
+
+        "long": side_stats("LONG"),
+
+        "short": side_stats("SHORT"),
+
+        "by_symbol": by_symbol
+    }
 
 
 def run_backtest():
@@ -501,46 +802,56 @@ def run_backtest():
     market_data = prepare_market_data()
 
     if not market_data:
-        raise RuntimeError("No market data downloaded")
+
+        raise RuntimeError(
+            "No market data downloaded from XT."
+        )
+
+    timeline = sorted(
+        set().union(*[
+            set(data["15m"].index[1:])
+            for data in market_data.values()
+        ])
+    )
+
+    if not timeline:
+
+        raise RuntimeError(
+            "No 15m timeline available."
+        )
 
     balance = INITIAL_BALANCE
 
     positions = {}
+
     prices = {}
+
     trades = []
 
-    timeline = sorted(set().union(*[
-        set(data["15m"].index[1:])
-        for data in market_data.values()
-    ]))
+    peak_equity = INITIAL_BALANCE
+
+    max_drawdown = 0.0
 
     log(
-        f"Starting portfolio backtest: "
-        f"{len(timeline)} timestamps"
+        f"Starting V2.2 backtest: "
+        f"{len(timeline)} timestamps, "
+        f"{len(market_data)} markets"
     )
-
-    peak_equity = INITIAL_BALANCE
-    max_drawdown = 0.0
 
     for timestamp in timeline:
 
-        # ----------------------------------
-        # 1. Mark all markets at candle OPEN.
-        # ----------------------------------
-
+        # Update prices to candle open
         for symbol, data in market_data.items():
 
             df = data["15m"]
 
             if timestamp in df.index:
+
                 prices[symbol] = float(
                     df.loc[timestamp, "open"]
                 )
 
-        # ----------------------------------
-        # 2. Manage existing positions.
-        # ----------------------------------
-
+        # Process existing positions first
         for symbol in list(positions.keys()):
 
             df = market_data[symbol]["15m"]
@@ -548,11 +859,9 @@ def run_backtest():
             if timestamp not in df.index:
                 continue
 
-            candle = df.loc[timestamp]
-
             exit_price, reason = check_exit(
                 positions[symbol],
-                candle
+                df.loc[timestamp]
             )
 
             if exit_price is not None:
@@ -568,26 +877,37 @@ def run_backtest():
                 trades.append(trade)
 
                 log(
-                    f"CLOSE {symbol} "
-                    f"{reason} "
-                    f"net={trade['net_pnl']:.4f}"
+                    f"CLOSE {symbol} {reason} "
+                    f"net={trade['net_pnl']:.5f}"
                 )
 
-        # ----------------------------------
-        # 3. Calculate equity using OPEN prices.
-        # No current candle close is used here.
-        # ----------------------------------
-
-        equity = equity_value(
+        # Estimate intrabar adverse drawdown
+        adverse = adverse_equity(
             balance,
             positions,
+            market_data,
+            timestamp,
             prices
         )
 
-        # ----------------------------------
-        # 4. Find new signals.
-        # ----------------------------------
+        peak_equity = max(
+            peak_equity,
+            equity_value(
+                balance,
+                positions,
+                prices
+            )
+        )
 
+        if peak_equity > 0:
+
+            max_drawdown = max(
+                max_drawdown,
+                (peak_equity - adverse)
+                / peak_equity * 100
+            )
+
+        # Signals use only candles completed before current candle
         if len(positions) < MAX_OPEN_POSITIONS:
 
             for symbol, data in market_data.items():
@@ -599,24 +919,25 @@ def run_backtest():
                     continue
 
                 df15 = data["15m"]
+                df1 = data["1h"]
+                df4 = data["4h"]
 
                 if timestamp not in df15.index:
                     continue
 
-                index = df15.index.get_loc(timestamp)
+                idx = df15.index.get_loc(timestamp)
 
-                if not isinstance(index, (int, np.integer)):
+                if (
+                    not isinstance(idx, (int, np.integer))
+                    or idx < 1
+                ):
                     continue
 
-                # Only previously completed 15m candles.
                 history15 = df15.iloc[
-                    max(0, index - 300):index
+                    max(0, idx - 350):idx
                 ]
 
-                # Higher timeframe candles must be closed.
-                df1 = data["1h"]
-                df4 = data["4h"]
-
+                # Higher timeframe candles must be closed
                 end1 = df1.index.searchsorted(
                     timestamp,
                     side="right"
@@ -628,21 +949,23 @@ def run_backtest():
                 )
 
                 history1 = df1.iloc[
-                    max(0, end1 - 250):end1
+                    max(0, end1 - 260):end1
                 ]
 
                 history4 = df4.iloc[
-                    max(0, end4 - 250):end4
+                    max(0, end4 - 260):end4
                 ]
 
-                if (
-                    len(history15) < 200
-                    or len(history1) < 205
-                    or len(history4) < 205
-                ):
+                if min(
+                    len(history15),
+                    len(history1),
+                    len(history4)
+                ) < 210:
+
                     continue
 
                 try:
+
                     signal = generate_signal(
                         history15,
                         history1,
@@ -651,18 +974,20 @@ def run_backtest():
                     )
 
                 except Exception as exc:
+
                     log(
                         f"Signal error {symbol}: {exc}"
                     )
+
                     continue
 
                 if signal.get("signal") not in (
                     "LONG",
                     "SHORT"
                 ):
+
                     continue
 
-                # Recalculate equity at OPEN prices.
                 equity = equity_value(
                     balance,
                     positions,
@@ -672,7 +997,7 @@ def run_backtest():
                 balance = open_position(
                     symbol,
                     signal,
-                    df15.iloc[index],
+                    df15.iloc[idx],
                     timestamp,
                     equity,
                     balance,
@@ -680,16 +1005,13 @@ def run_backtest():
                     prices
                 )
 
-        # ----------------------------------
-        # 5. Update prices to candle CLOSE.
-        # Only after entry decisions are complete.
-        # ----------------------------------
-
+        # Mark all available markets at candle close
         for symbol, data in market_data.items():
 
             df = data["15m"]
 
             if timestamp in df.index:
+
                 prices[symbol] = float(
                     df.loc[timestamp, "close"]
                 )
@@ -707,90 +1029,21 @@ def run_backtest():
 
         if peak_equity > 0:
 
-            drawdown = (
-                (peak_equity - equity) / peak_equity
-            ) * 100
-
             max_drawdown = max(
                 max_drawdown,
-                drawdown
+                (peak_equity - equity)
+                / peak_equity * 100
             )
 
-    # ----------------------------------
-    # 6. Final portfolio valuation.
-    # ----------------------------------
-
-    final_equity = equity_value(
-        balance,
-        positions,
-        prices
+    # Close remaining positions at the end of the test
+    final_timestamp = (
+        timeline[-1]
+        + pd.Timedelta(minutes=15)
     )
 
-    closed = trades
+    for symbol in list(positions.keys()):
 
-    winners = [
-        trade for trade in closed
-        if trade["net_pnl"] > 0
-    ]
-
-    losers = [
-        trade for trade in closed
-        if trade["net_pnl"] <= 0
-    ]
-
-    gross_profit = sum(
-        trade["net_pnl"]
-        for trade in winners
-    )
-
-    gross_loss = abs(sum(
-        trade["net_pnl"]
-        for trade in losers
-    ))
-
-    profit_factor = (
-        gross_profit / gross_loss
-        if gross_loss > 0
-        else None
-    )
-
-    win_rate = (
-        len(winners) / len(closed) * 100
-        if closed else 0
-    )
-
-    long_trades = [
-        trade for trade in closed
-        if trade["side"] == "LONG"
-    ]
-
-    short_trades = [
-        trade for trade in closed
-        if trade["side"] == "SHORT"
-    ]
-
-    def side_summary(items):
-
-        return {
-            "trades": len(items),
-
-            "net_pnl": round(
-                sum(
-                    trade["net_pnl"]
-                    for trade in items
-                ),
-                4
-            ),
-
-            "wins": sum(
-                trade["net_pnl"] > 0
-                for trade in items
-            )
-        }
-
-    open_summary = []
-
-    for symbol, position in positions.items():
+        position = positions.pop(symbol)
 
         mark = prices.get(
             symbol,
@@ -799,48 +1052,58 @@ def run_backtest():
 
         if position["side"] == "LONG":
 
-            unrealized = (
-                mark - position["entry"]
-            ) * position["quantity"]
+            exit_price = (
+                mark * (1 - SLIPPAGE_RATE)
+            )
 
         else:
 
-            unrealized = (
-                position["entry"] - mark
-            ) * position["quantity"]
-
-        open_summary.append({
-            "symbol": symbol,
-            "side": position["side"],
-
-            "entry": position["entry"],
-            "mark_price": mark,
-
-            "unrealized_pnl": round(
-                unrealized,
-                6
-            ),
-
-            "margin": round(
-                position["margin"],
-                6
+            exit_price = (
+                mark * (1 + SLIPPAGE_RATE)
             )
-        })
+
+        balance, trade = close_position(
+            position,
+            exit_price,
+            final_timestamp,
+            "END_OF_TEST",
+            balance
+        )
+
+        trades.append(trade)
+
+    final_equity = balance
+
+    stats = summarize_trades(trades)
 
     report = {
 
-        "version": "2.1",
+        "version": "2.2",
+
+        "mode": "BACKTEST_ONLY",
+
         "exchange": "XT",
 
+        "symbols_tested": list(
+            market_data.keys()
+        ),
+
         "timeframe": "15m",
+
         "confirmation_timeframes": [
             "1h",
             "4h"
         ],
 
         "initial_balance": INITIAL_BALANCE,
-        "final_balance": round(balance, 6),
-        "final_equity": round(final_equity, 6),
+
+        "final_balance": round(
+            balance, 6
+        ),
+
+        "final_equity": round(
+            final_equity, 6
+        ),
 
         "net_profit": round(
             final_equity - INITIAL_BALANCE,
@@ -852,37 +1115,31 @@ def run_backtest():
             3
         ),
 
-        "closed_trades": len(closed),
-        "wins": len(winners),
-        "losses": len(losers),
-
-        "win_rate": round(win_rate, 2),
-
-        "profit_factor": (
-            round(profit_factor, 4)
-            if profit_factor is not None
-            else None
-        ),
-
         "max_drawdown_percent": round(
-            max_drawdown,
-            3
+            max_drawdown, 3
         ),
-
-        "long": side_summary(long_trades),
-        "short": side_summary(short_trades),
-
-        "open_positions": open_summary,
 
         "leverage": LEVERAGE,
 
         "risk_per_trade": RISK_PER_TRADE,
-        "max_margin_fraction": MAX_MARGIN_FRACTION,
+
+        "max_margin_fraction_per_position": (
+            MAX_MARGIN_FRACTION
+        ),
+
+        "max_open_positions": MAX_OPEN_POSITIONS,
 
         "fee_rate_per_side": FEE_RATE,
+
         "slippage_rate_per_side": SLIPPAGE_RATE,
 
         "funding_included": False,
+
+        "liquidation_model_included": False,
+
+        "end_positions_closed": True,
+
+        **stats,
 
         "created_at": datetime.now(
             timezone.utc
@@ -893,32 +1150,43 @@ def run_backtest():
         REPORT_FILE,
         "w",
         encoding="utf-8"
-    ) as file:
+    ) as f:
 
         json.dump(
             report,
-            file,
+            f,
             ensure_ascii=False,
             indent=2
         )
 
-    pd.DataFrame(closed).to_csv(
+    pd.DataFrame(trades).to_csv(
         TRADES_FILE,
         index=False
     )
 
-    print("\n========== BACKTEST V2.1 ==========")
+    print(
+        "\n========== BACKTEST V2.2 =========="
+    )
 
-    print(json.dumps(
-        report,
-        ensure_ascii=False,
-        indent=2
-    ))
+    print(
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            indent=2
+        )
+    )
 
-    print("===================================")
+    print(
+        "==================================="
+    )
+
+    log(
+        f"Saved {REPORT_FILE} and {TRADES_FILE}"
+    )
 
     return report
 
 
 if __name__ == "__main__":
+
     run_backtest()
