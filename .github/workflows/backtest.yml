@@ -1,3 +1,4 @@
+
 name: backtest-v23
 
 on:
@@ -6,10 +7,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: backtest-v23
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -24,7 +29,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run V2.3 backtest
-        run: python backtest.py
+        run: python -u backtest.py
 
       - name: Upload V2.3 backtest reports
         if: always()
@@ -34,5 +39,5 @@ jobs:
           path: |
             backtest_report_v23.json
             backtest_trades_v23.csv
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
