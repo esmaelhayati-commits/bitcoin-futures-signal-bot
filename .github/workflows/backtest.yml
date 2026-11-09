@@ -1,4 +1,3 @@
-```yaml
 name: backtest-v23
 
 on:
@@ -37,4 +36,3 @@ jobs:
             backtest_trades_v23.csv
           if-no-files-found: error
           retention-days: 30
-```
