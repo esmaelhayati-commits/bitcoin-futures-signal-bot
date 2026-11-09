@@ -1682,6 +1682,9 @@ def run_backtest(market_data_override=None, scenario_name="A_BASELINE"):
 
                         trades.append(trade)
 
+                        if scenario_name == "B_LOSS_COOLDOWN" and trade["net_pnl"] <= 0:
+                            cooldown_until[symbol] = timestamp + pd.Timedelta(hours=COOLDOWN_HOURS)
+
                         log(
                             f"SAME-CANDLE CLOSE {symbol} "
                             f"{reason} "
@@ -1877,6 +1880,14 @@ def run_backtest(market_data_override=None, scenario_name="A_BASELINE"):
             timezone.utc
         ).isoformat()
     }
+
+    report["experiment_scenario"] = scenario_name
+    report["cooldown_hours_after_loss"] = (
+        COOLDOWN_HOURS if scenario_name == "B_LOSS_COOLDOWN" else 0
+    )
+    report["max_same_direction_positions"] = (
+        MAX_SAME_DIRECTION_POSITIONS if scenario_name == "C_DIRECTION_CAP" else None
+    )
 
     # ------------------------------------------
     # 9. Save new independent report files
