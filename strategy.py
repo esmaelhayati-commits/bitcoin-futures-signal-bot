@@ -1,302 +1,320 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-MIN_CANDLES = 200
+MIN_CANDLES = 210
 ATR_PERIOD = 14
 RSI_PERIOD = 14
+ADX_PERIOD = 14
+STOP_ATR_MULTIPLIER = 1.5
+TARGET_ATR_MULTIPLIER = 3.0
+
+
+def _validate_ohlcv(df):
+    required = ["open", "high", "low", "close", "volume"]
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing OHLCV columns: {missing}")
+    out = df[required].copy()
+    for col in required:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out.replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def calculate_rsi(series, period=RSI_PERIOD):
     delta = series.diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(
         alpha=1 / period,
-        adjust=False
+        adjust=False,
+        min_periods=period
     ).mean()
-
-    avg_loss = loss.ewm(
+    avg_loss = losses.ewm(
         alpha=1 / period,
-        adjust=False
+        adjust=False,
+        min_periods=period
     ).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
-
-    return (100 - 100 / (1 + rs)).fillna(50)
+    result = 100 - (100 / (1 + rs))
+    result = result.where(avg_loss != 0, 100)
+    result = result.where(avg_gain != 0, 0)
+    result = result.where(
+        ~((avg_gain == 0) & (avg_loss == 0)),
+        50
+    )
+    return result.fillna(50)
 
 
 def calculate_atr(df, period=ATR_PERIOD):
-    high_low = df["high"] - df["low"]
+    previous_close = df["close"].shift(1)
 
-    high_close = (
-        df["high"] - df["close"].shift()
-    ).abs()
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - previous_close).abs(),
+        (df["low"] - previous_close).abs()
+    ], axis=1).max(axis=1)
 
-    low_close = (
-        df["low"] - df["close"].shift()
-    ).abs()
-
-    true_range = pd.concat(
-        [high_low, high_close, low_close],
-        axis=1
-    ).max(axis=1)
-
-    return true_range.ewm(
+    return tr.ewm(
         alpha=1 / period,
-        adjust=False
+        adjust=False,
+        min_periods=period
     ).mean()
+
+
+def calculate_adx(df, period=ADX_PERIOD):
+    up = df["high"].diff()
+    down = -df["low"].diff()
+
+    plus_dm = pd.Series(
+        np.where((up > down) & (up > 0), up, 0.0),
+        index=df.index
+    )
+
+    minus_dm = pd.Series(
+        np.where((down > up) & (down > 0), down, 0.0),
+        index=df.index
+    )
+
+    previous_close = df["close"].shift(1)
+
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - previous_close).abs(),
+        (df["low"] - previous_close).abs()
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+
+    plus_di = (
+        100 * plus_dm.ewm(
+            alpha=1 / period,
+            adjust=False,
+            min_periods=period
+        ).mean() / atr.replace(0, np.nan)
+    )
+
+    minus_di = (
+        100 * minus_dm.ewm(
+            alpha=1 / period,
+            adjust=False,
+            min_periods=period
+        ).mean() / atr.replace(0, np.nan)
+    )
+
+    dx = (
+        100 * (plus_di - minus_di).abs()
+        / (plus_di + minus_di).replace(0, np.nan)
+    )
+
+    return dx.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period
+    ).mean().fillna(0)
 
 
 def prepare_data(df):
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("Input must be a pandas DataFrame")
+    out = _validate_ohlcv(df)
 
-    required = [
-        "open", "high", "low", "close", "volume"
-    ]
-
-    missing = [
-        col for col in required
-        if col not in df.columns
-    ]
-
-    if missing:
-        raise ValueError(f"Missing columns: {missing}")
-
-    data = df.copy()
-
-    for col in required:
-        data[col] = pd.to_numeric(
-            data[col],
-            errors="coerce"
-        )
-
-    data = data.dropna(subset=required)
-
-    if len(data) < MIN_CANDLES:
-        raise ValueError(
-            f"Need at least {MIN_CANDLES} candles; "
-            f"received {len(data)}"
-        )
-
-    data["ema20"] = data["close"].ewm(
-        span=20,
-        adjust=False
+    out["ema20"] = out["close"].ewm(
+        span=20, adjust=False
     ).mean()
 
-    data["ema50"] = data["close"].ewm(
-        span=50,
-        adjust=False
+    out["ema50"] = out["close"].ewm(
+        span=50, adjust=False
     ).mean()
 
-    data["ema200"] = data["close"].ewm(
-        span=200,
-        adjust=False
+    out["ema200"] = out["close"].ewm(
+        span=200, adjust=False
     ).mean()
 
-    data["rsi"] = calculate_rsi(data["close"])
-    data["atr"] = calculate_atr(data)
+    out["rsi"] = calculate_rsi(out["close"])
+    out["atr"] = calculate_atr(out)
+    out["adx"] = calculate_adx(out)
 
-    data = data.replace(
-        [np.inf, -np.inf],
-        np.nan
-    )
-
-    data = data.dropna(
-        subset=[
-            "ema20",
-            "ema50",
-            "ema200",
-            "rsi",
-            "atr"
-        ]
-    )
-
-    return data
+    return out
 
 
 def get_trend(df):
-    last = df.iloc[-1]
+    data = prepare_data(df)
 
-    if (
-        last["close"] > last["ema20"]
-        and last["ema20"] > last["ema50"]
-        and last["ema50"] > last["ema200"]
-    ):
+    if len(data) < MIN_CANDLES:
+        return "INSUFFICIENT_DATA"
+
+    last = data.iloc[-1]
+
+    if last["close"] > last["ema20"] > last["ema50"] > last["ema200"]:
         return "BULLISH"
 
-    if (
-        last["close"] < last["ema20"]
-        and last["ema20"] < last["ema50"]
-        and last["ema50"] < last["ema200"]
-    ):
+    if last["close"] < last["ema20"] < last["ema50"] < last["ema200"]:
         return "BEARISH"
 
     return "SIDEWAYS"
 
 
-def analyze_market(df_15m, df_1h, df_4h):
-
-    data_15m = prepare_data(df_15m)
-    data_1h = prepare_data(df_1h)
-    data_4h = prepare_data(df_4h)
-
-    trend_15m = get_trend(data_15m)
-    trend_1h = get_trend(data_1h)
-    trend_4h = get_trend(data_4h)
-
-    last = data_15m.iloc[-1]
-
-    price = float(last["close"])
-    rsi = float(last["rsi"])
-    atr = float(last["atr"])
-
-    long_score = 0
-    short_score = 0
-    reasons = []
-
-    # 15m trend
-    if trend_15m == "BULLISH":
-        long_score += 3
-        reasons.append("15m bullish trend")
-
-    elif trend_15m == "BEARISH":
-        short_score += 3
-        reasons.append("15m bearish trend")
-
-    # 1h trend
-    if trend_1h == "BULLISH":
-        long_score += 2
-        reasons.append("1h bullish trend")
-
-    elif trend_1h == "BEARISH":
-        short_score += 2
-        reasons.append("1h bearish trend")
-
-    # 4h trend
-    if trend_4h == "BULLISH":
-        long_score += 2
-        reasons.append("4h bullish trend")
-
-    elif trend_4h == "BEARISH":
-        short_score += 2
-        reasons.append("4h bearish trend")
-
-    # RSI
-    if 50 < rsi < 70:
-        long_score += 2
-        reasons.append("RSI supports LONG")
-
-    elif 30 < rsi < 50:
-        short_score += 2
-        reasons.append("RSI supports SHORT")
-
-    # EMA confirmation
-    if last["ema20"] > last["ema50"]:
-        long_score += 1
-
-    elif last["ema20"] < last["ema50"]:
-        short_score += 1
-
-    # Signal decision
-    signal = "WAIT"
-
-    if (
-        long_score >= 7
-        and long_score - short_score >= 3
-        and trend_1h == "BULLISH"
-    ):
-        signal = "LONG"
-
-    elif (
-        short_score >= 7
-        and short_score - long_score >= 3
-        and trend_1h == "BEARISH"
-    ):
-        signal = "SHORT"
-
-    confidence = round(
-        max(long_score, short_score) / 10 * 100,
-        1
-    )
-
-    # Entry and targets
-    entry = price
-
-    stop_loss = None
-    tp1 = None
-    tp2 = None
-    tp3 = None
-
-    if signal == "LONG":
-        stop_loss = price - atr * 1.5
-        tp1 = price + atr * 1.5
-        tp2 = price + atr * 2.5
-        tp3 = price + atr * 4
-
-    elif signal == "SHORT":
-        stop_loss = price + atr * 1.5
-        tp1 = price - atr * 1.5
-        tp2 = price - atr * 2.5
-        tp3 = price - atr * 4
-
-    return {
-        "signal": signal,
-        "side": signal,
-
-        "entry": entry,
-        "entry_price": entry,
-
-        "stop": stop_loss,
-        "stop_loss": stop_loss,
-
-        "target": tp1,
-        "take_profit": tp1,
-
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-
-        "confidence": confidence,
-
-        "long_score": long_score,
-        "short_score": short_score,
-
-        "trend_15m": trend_15m,
-        "trend_1h": trend_1h,
-        "trend_4h": trend_4h,
-
-        "rsi": round(rsi, 2),
-        "atr": round(atr, 8),
-
-        "reasons": reasons
+def _hold(reason, **extra):
+    result = {
+        "signal": "HOLD",
+        "side": "HOLD",
+        "confidence": 0,
+        "reason": reason
     }
 
+    result.update(extra)
+    return result
 
-def generate_signal(
-    df_15m,
-    df_1h,
-    df_4h,
-    symbol=None
-):
-    """
-    Compatible with backtest.py:
-    generate_signal(history15, history1, history4, symbol)
-    """
 
-    if not isinstance(df_15m, pd.DataFrame):
-        raise TypeError("15m data must be a DataFrame")
+def analyze_market(df_15m, df_1h, df_4h, symbol=None):
 
-    if not isinstance(df_1h, pd.DataFrame):
-        raise TypeError("1h data must be a DataFrame")
+    try:
+        d15 = prepare_data(df_15m)
+        d1 = prepare_data(df_1h)
+        d4 = prepare_data(df_4h)
 
-    if not isinstance(df_4h, pd.DataFrame):
-        raise TypeError("4h data must be a DataFrame")
+    except Exception as exc:
+        return _hold(
+            f"DATA_ERROR: {exc}",
+            symbol=symbol
+        )
 
+    if min(len(d15), len(d1), len(d4)) < MIN_CANDLES:
+        return _hold(
+            "INSUFFICIENT_DATA",
+            symbol=symbol
+        )
+
+    a = d15.iloc[-1]
+    previous = d15.iloc[-2]
+
+    h1 = d1.iloc[-1]
+    h4 = d4.iloc[-1]
+
+    bullish = (
+        h1["close"] > h1["ema20"] > h1["ema50"] > h1["ema200"]
+        and
+        h4["close"] > h4["ema20"] > h4["ema50"] > h4["ema200"]
+    )
+
+    bearish = (
+        h1["close"] < h1["ema20"] < h1["ema50"] < h1["ema200"]
+        and
+        h4["close"] < h4["ema20"] < h4["ema50"] < h4["ema200"]
+    )
+
+    if not np.isfinite(a["atr"]) or a["atr"] <= 0:
+        return _hold("INVALID_ATR", symbol=symbol)
+
+    # Filter weak trends
+    if a["adx"] < 18:
+        return _hold(
+            "ADX_FILTER",
+            symbol=symbol,
+            adx=round(float(a["adx"]), 2)
+        )
+
+    # Long setup
+    long_setup = (
+        bullish
+        and a["close"] > a["ema200"]
+        and a["ema20"] > a["ema50"]
+        and a["low"] <= a["ema20"] * 1.003
+        and a["close"] > a["ema20"]
+        and 50 <= a["rsi"] <= 68
+        and a["close"] > previous["close"]
+    )
+
+    # Short setup
+    short_setup = (
+        bearish
+        and a["close"] < a["ema200"]
+        and a["ema20"] < a["ema50"]
+        and a["high"] >= a["ema20"] * 0.997
+        and a["close"] < a["ema20"]
+        and 32 <= a["rsi"] <= 50
+        and a["close"] < previous["close"]
+    )
+
+    common = {
+        "symbol": symbol,
+        "entry": float(a["close"]),
+        "entry_price": float(a["close"]),
+        "atr": float(a["atr"]),
+        "rsi": round(float(a["rsi"]), 2),
+        "adx": round(float(a["adx"]), 2),
+        "trend_1h": (
+            "BULLISH" if bullish
+            else ("BEARISH" if bearish else "MIXED")
+        ),
+        "trend_4h": (
+            "BULLISH" if bullish
+            else ("BEARISH" if bearish else "MIXED")
+        ),
+        "stop_atr_multiplier": STOP_ATR_MULTIPLIER,
+        "target_atr_multiplier": TARGET_ATR_MULTIPLIER,
+        "risk_reward": 2.0
+    }
+
+    if long_setup:
+
+        stop = float(
+            a["close"] - STOP_ATR_MULTIPLIER * a["atr"]
+        )
+
+        target = float(
+            a["close"] + TARGET_ATR_MULTIPLIER * a["atr"]
+        )
+
+        return {
+            **common,
+            "signal": "LONG",
+            "side": "LONG",
+            "stop": stop,
+            "stop_loss": stop,
+            "target": target,
+            "take_profit": target,
+            "confidence": 70,
+            "reason": "15m pullback in aligned 1h/4h bullish trend"
+        }
+
+    if short_setup:
+
+        stop = float(
+            a["close"] + STOP_ATR_MULTIPLIER * a["atr"]
+        )
+
+        target = float(
+            a["close"] - TARGET_ATR_MULTIPLIER * a["atr"]
+        )
+
+        return {
+            **common,
+            "signal": "SHORT",
+            "side": "SHORT",
+            "stop": stop,
+            "stop_loss": stop,
+            "target": target,
+            "take_profit": target,
+            "confidence": 70,
+            "reason": "15m pullback in aligned 1h/4h bearish trend"
+        }
+
+    return _hold(
+        "NO_VALID_PULLBACK",
+        **common
+    )
+
+
+def generate_signal(df_15m, df_1h, df_4h, symbol=None):
     return analyze_market(
         df_15m,
         df_1h,
-        df_4h
+        df_4h,
+        symbol
     )
