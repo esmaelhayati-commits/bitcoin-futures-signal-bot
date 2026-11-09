@@ -1,5 +1,5 @@
 
-name: backtest-v23
+name: backtest-v231
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: backtest-v23
+  group: backtest-v231
   cancel-in-progress: false
 
 jobs:
@@ -28,16 +28,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run V2.3 backtest
+      - name: Run diagnostic V2.3.1 backtest
         run: python -u backtest.py
 
-      - name: Upload V2.3 backtest reports
+      - name: Upload V2.3.1 reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-v23-results
+          name: backtest-v231-results
           path: |
-            backtest_report_v23.json
-            backtest_trades_v23.csv
+            backtest_report_v231.json
+            backtest_trades_v231.csv
           if-no-files-found: warn
           retention-days: 30
