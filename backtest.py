@@ -1,3 +1,4 @@
+
 import ccxt
 import pandas as pd
 import numpy as np
@@ -5,19 +6,23 @@ import json
 import time
 
 from datetime import datetime, timezone
-from strategy import generate_signal
+from strategy import (
+    generate_signal,
+    STRATEGY_VERSION,
+    STOP_ATR_MULTIPLIER,
+    TARGET_ATR_MULTIPLIER
+)
 
-
-# ==========================================
-# FUTURES BOT V2.2 - BACKTEST ONLY
-# XT USDT swaps
-# 15m entries | 1h/4h confirmation
-# NO LIVE ORDERS
-# ==========================================
+# ==================================================
+# BITCOIN FUTURES BOT V2.3
+# BACKTEST ONLY - NO REAL ORDERS
+# Exchange: XT
+# Entry: 15m
+# Confirmation: 1h + 4h
+# ==================================================
 
 INITIAL_BALANCE = 10.0
 LEVERAGE = 20
-
 RISK_PER_TRADE = 0.01
 MAX_MARGIN_FRACTION = 0.20
 MAX_OPEN_POSITIONS = 3
@@ -27,12 +32,10 @@ SLIPPAGE_RATE = 0.0005
 
 LOOKBACK_DAYS = 90
 CANDLE_LIMIT = 500
-
 TIMEFRAME_MS = 15 * 60 * 1000
 
-REPORT_FILE = "backtest_report.json"
-TRADES_FILE = "backtest_trades.csv"
-
+REPORT_FILE = "backtest_report_v23.json"
+TRADES_FILE = "backtest_trades_v23.csv"
 
 REQUESTED_SYMBOLS = [
     "BTC/USDT",
@@ -47,6 +50,19 @@ REQUESTED_SYMBOLS = [
     "LTC/USDT"
 ]
 
+# V2.2 reference values from the saved historical report.
+# These values are NEVER used in the trading simulation.
+
+V22_REFERENCE = {
+    "final_equity": 2.782705,
+    "return_percent": -72.173,
+    "max_drawdown_percent": 82.059,
+    "closed_trades": 529,
+    "win_rate_percent": 34.22,
+    "profit_factor": 0.7423,
+    "long_net_pnl": -2.829383,
+    "short_net_pnl": -4.387924
+}
 
 exchange = ccxt.xt({
     "enableRateLimit": True,
@@ -59,7 +75,8 @@ exchange = ccxt.xt({
 
 def log(message):
     print(
-        f"[{datetime.now(timezone.utc).isoformat()}] {message}"
+        f"[{datetime.now(timezone.utc).isoformat()}] "
+        f"{message}"
     )
 
 
@@ -76,7 +93,6 @@ def resolve_swap_symbol(requested, markets):
             and market.get("active", True)
             and market.get("settle") in (quote, None)
         ):
-
             return market["symbol"]
 
     return None
@@ -143,9 +159,10 @@ def fetch_history(symbol):
         ]
     )
 
-    df = df.drop_duplicates(
-        subset=["timestamp"]
-    ).sort_values("timestamp")
+    df = (
+        df.drop_duplicates(subset=["timestamp"])
+        .sort_values("timestamp")
+    )
 
     df["datetime"] = pd.to_datetime(
         df["timestamp"],
@@ -164,7 +181,8 @@ def fetch_history(symbol):
         np.nan
     ).dropna()
 
-    # Remove current unfinished 15m candle
+    # Exclude unfinished candles.
+
     now = pd.Timestamp.now(tz="UTC")
 
     df = df[
@@ -174,7 +192,7 @@ def fetch_history(symbol):
     if len(df) < 1000:
 
         log(
-            f"Insufficient history for {symbol}: "
+            f"Insufficient history {symbol}: "
             f"{len(df)} candles"
         )
 
@@ -201,7 +219,8 @@ def resample_ohlcv(df, timeframe, expected_bars):
 
     counts = grouped["close"].count()
 
-    # Exclude incomplete higher-timeframe candles
+    # Keep only complete higher-timeframe candles.
+
     return result[
         counts == expected_bars
     ].dropna()
@@ -224,10 +243,7 @@ def prepare_market_data():
 
         if not symbol:
 
-            log(
-                f"Swap market not found: {requested}"
-            )
-
+            log(f"Swap market not found: {requested}")
             continue
 
         df15 = fetch_history(symbol)
@@ -250,7 +266,8 @@ def prepare_market_data():
         if min(len(df1), len(df4)) < 210:
 
             log(
-                f"Insufficient higher timeframe history: {symbol}"
+                f"Insufficient higher timeframe "
+                f"history: {symbol}"
             )
 
             continue
@@ -292,7 +309,10 @@ def equity_value(balance, positions, prices):
 
         total += unrealized_pnl(
             position,
-            prices.get(symbol, position["entry"])
+            prices.get(
+                symbol,
+                position["entry"]
+            )
         )
 
     return total
@@ -305,9 +325,6 @@ def adverse_equity(
     timestamp,
     prices
 ):
-
-    # Intrabar adverse estimate:
-    # low for LONG and high for SHORT
 
     total = balance
 
@@ -357,6 +374,7 @@ def close_position(
 ):
 
     side = position["side"]
+
     quantity = position["quantity"]
     entry = position["entry"]
 
@@ -386,16 +404,15 @@ def close_position(
 
     trade = {
 
-        "symbol": position["symbol"],
+        "strategy_version": STRATEGY_VERSION,
 
+        "symbol": position["symbol"],
         "side": side,
 
         "entry_time": position["entry_time"],
-
         "exit_time": timestamp.isoformat(),
 
         "entry": round(entry, 10),
-
         "exit": round(exit_price, 10),
 
         "stop_loss": round(
@@ -428,6 +445,25 @@ def close_position(
             net_pnl, 6
         ),
 
+        "entry_rsi": position.get("entry_rsi"),
+        "entry_adx": position.get("entry_adx"),
+
+        "entry_body_ratio": position.get(
+            "entry_body_ratio"
+        ),
+
+        "entry_trend_1h": position.get(
+            "entry_trend_1h"
+        ),
+
+        "entry_trend_4h": position.get(
+            "entry_trend_4h"
+        ),
+
+        "entry_reason": position.get(
+            "entry_reason"
+        ),
+
         "reason": reason
     }
 
@@ -450,7 +486,10 @@ def check_exit(position, candle):
         stop_hit = low <= stop
         target_hit = high >= target
 
-        # If both are hit, assume stop first
+        # Conservative rule:
+        # If both levels hit in one candle,
+        # assume stop loss happens first.
+
         if stop_hit:
 
             raw_exit = min(
@@ -520,26 +559,27 @@ def open_position(
 
     side = signal.get("signal")
 
-    if side not in ("LONG", "SHORT") or equity <= 0:
+    if side not in ("LONG", "SHORT"):
+        return balance
+
+    if equity <= 0:
         return balance
 
     raw_entry = float(candle["open"])
 
-    if not np.isfinite(raw_entry) or raw_entry <= 0:
+    if (
+        not np.isfinite(raw_entry)
+        or raw_entry <= 0
+    ):
         return balance
 
-    # Apply entry slippage
-    if side == "LONG":
+    # Simulated market execution with slippage.
 
-        entry = raw_entry * (
-            1 + SLIPPAGE_RATE
-        )
-
-    else:
-
-        entry = raw_entry * (
-            1 - SLIPPAGE_RATE
-        )
+    entry = (
+        raw_entry * (1 + SLIPPAGE_RATE)
+        if side == "LONG"
+        else raw_entry * (1 - SLIPPAGE_RATE)
+    )
 
     try:
 
@@ -547,15 +587,19 @@ def open_position(
 
     except (KeyError, TypeError, ValueError):
 
-        log(f"Missing ATR in signal: {symbol}")
+        log(f"Missing ATR: {symbol}")
         return balance
 
     if not np.isfinite(atr) or atr <= 0:
         return balance
 
-    # Recalculate SL and TP from actual fill price
-    stop_distance = 1.5 * atr
-    target_distance = 3.0 * atr
+    stop_distance = (
+        STOP_ATR_MULTIPLIER * atr
+    )
+
+    target_distance = (
+        TARGET_ATR_MULTIPLIER * atr
+    )
 
     if side == "LONG":
 
@@ -575,7 +619,9 @@ def open_position(
             stop * (1 + SLIPPAGE_RATE)
         )
 
-    # Include estimated entry and exit fees in risk sizing
+    # Include both entry and estimated exit fees
+    # in the risk calculation.
+
     estimated_cost_per_unit = (
         entry * FEE_RATE
         + estimated_exit * FEE_RATE
@@ -589,7 +635,9 @@ def open_position(
     if estimated_loss_per_unit <= 0:
         return balance
 
-    risk_amount = equity * RISK_PER_TRADE
+    risk_amount = (
+        equity * RISK_PER_TRADE
+    )
 
     quantity_by_risk = (
         risk_amount / estimated_loss_per_unit
@@ -623,9 +671,13 @@ def open_position(
 
     notional = quantity * entry
 
-    margin = notional / LEVERAGE
+    margin = (
+        notional / LEVERAGE
+    )
 
-    entry_fee = notional * FEE_RATE
+    entry_fee = (
+        notional * FEE_RATE
+    )
 
     if balance - entry_fee < 0:
         return balance
@@ -635,22 +687,37 @@ def open_position(
     positions[symbol] = {
 
         "symbol": symbol,
-
         "side": side,
 
         "entry": entry,
-
         "quantity": quantity,
 
         "stop_loss": stop,
-
         "take_profit": target,
 
         "margin": margin,
-
         "entry_fee": entry_fee,
 
-        "entry_time": timestamp.isoformat()
+        "entry_time": timestamp.isoformat(),
+
+        "entry_rsi": signal.get("rsi"),
+        "entry_adx": signal.get("adx"),
+
+        "entry_body_ratio": signal.get(
+            "body_ratio"
+        ),
+
+        "entry_trend_1h": signal.get(
+            "trend_1h"
+        ),
+
+        "entry_trend_4h": signal.get(
+            "trend_4h"
+        ),
+
+        "entry_reason": signal.get(
+            "reason"
+        )
     }
 
     prices[symbol] = entry
@@ -667,7 +734,7 @@ def open_position(
     return balance
 
 
-def _profit_factor(items):
+def profit_factor(items):
 
     profits = sum(
         t["net_pnl"]
@@ -681,10 +748,12 @@ def _profit_factor(items):
         if t["net_pnl"] <= 0
     ))
 
-    return (
-        round(profits / losses, 4)
-        if losses > 0
-        else None
+    if losses == 0:
+        return None
+
+    return round(
+        profits / losses,
+        4
     )
 
 
@@ -716,12 +785,17 @@ def summarize_trades(trades):
                 for t in items
             ),
 
+            "losses": sum(
+                t["net_pnl"] <= 0
+                for t in items
+            ),
+
             "net_pnl": round(
                 sum(t["net_pnl"] for t in items),
                 6
             ),
 
-            "profit_factor": _profit_factor(items)
+            "profit_factor": profit_factor(items)
         }
 
     by_symbol = {}
@@ -749,7 +823,28 @@ def summarize_trades(trades):
                 6
             ),
 
-            "profit_factor": _profit_factor(items)
+            "profit_factor": profit_factor(items)
+        }
+
+    by_exit_reason = {}
+
+    for reason in sorted(
+        set(t["reason"] for t in trades)
+    ):
+
+        items = [
+            t for t in trades
+            if t["reason"] == reason
+        ]
+
+        by_exit_reason[reason] = {
+
+            "trades": len(items),
+
+            "net_pnl": round(
+                sum(t["net_pnl"] for t in items),
+                6
+            )
         }
 
     gross_profit = sum(
@@ -765,16 +860,12 @@ def summarize_trades(trades):
         "closed_trades": len(trades),
 
         "wins": len(winners),
-
         "losses": len(losers),
 
-        "win_rate_percent": (
-            round(
-                100 * len(winners) / len(trades),
-                2
-            )
-            if trades else 0
-        ),
+        "win_rate_percent": round(
+            100 * len(winners) / len(trades),
+            2
+        ) if trades else 0,
 
         "profit_factor": (
             round(gross_profit / gross_loss, 4)
@@ -790,14 +881,64 @@ def summarize_trades(trades):
         ),
 
         "long": side_stats("LONG"),
-
         "short": side_stats("SHORT"),
 
-        "by_symbol": by_symbol
+        "by_symbol": by_symbol,
+
+        "by_exit_reason": by_exit_reason
     }
 
 
+def compare_with_v22(report):
+
+    comparison = {}
+
+    current_values = {
+
+        "final_equity": report["final_equity"],
+        "return_percent": report["return_percent"],
+        "max_drawdown_percent": report[
+            "max_drawdown_percent"
+        ],
+        "closed_trades": report["closed_trades"],
+        "win_rate_percent": report["win_rate_percent"],
+        "profit_factor": report["profit_factor"],
+        "long_net_pnl": report["long"]["net_pnl"],
+        "short_net_pnl": report["short"]["net_pnl"]
+    }
+
+    for key, current in current_values.items():
+
+        reference = V22_REFERENCE[key]
+
+        if current is None:
+
+            difference = None
+
+        else:
+
+            difference = round(
+                current - reference,
+                4
+            )
+
+        comparison[key] = {
+
+            "v22_reference": reference,
+            "v23_current": current,
+            "difference": difference
+        }
+
+    return comparison
+
+
 def run_backtest():
+
+    if STRATEGY_VERSION != "2.3":
+
+        raise RuntimeError(
+            "strategy.py is not version 2.3"
+        )
 
     market_data = prepare_market_data()
 
@@ -823,24 +964,24 @@ def run_backtest():
     balance = INITIAL_BALANCE
 
     positions = {}
-
     prices = {}
-
     trades = []
 
     peak_equity = INITIAL_BALANCE
-
     max_drawdown = 0.0
 
     log(
-        f"Starting V2.2 backtest: "
+        f"Starting V2.3 backtest: "
         f"{len(timeline)} timestamps, "
         f"{len(market_data)} markets"
     )
 
     for timestamp in timeline:
 
-        # Update prices to candle open
+        # ----------------------------------
+        # 1. Update opening prices
+        # ----------------------------------
+
         for symbol, data in market_data.items():
 
             df = data["15m"]
@@ -851,7 +992,10 @@ def run_backtest():
                     df.loc[timestamp, "open"]
                 )
 
-        # Process existing positions first
+        # ----------------------------------
+        # 2. Exit existing positions
+        # ----------------------------------
+
         for symbol in list(positions.keys()):
 
             df = market_data[symbol]["15m"]
@@ -877,11 +1021,15 @@ def run_backtest():
                 trades.append(trade)
 
                 log(
-                    f"CLOSE {symbol} {reason} "
+                    f"CLOSE {symbol} "
+                    f"{reason} "
                     f"net={trade['net_pnl']:.5f}"
                 )
 
-        # Estimate intrabar adverse drawdown
+        # ----------------------------------
+        # 3. Calculate adverse drawdown
+        # ----------------------------------
+
         adverse = adverse_equity(
             balance,
             positions,
@@ -907,7 +1055,10 @@ def run_backtest():
                 / peak_equity * 100
             )
 
-        # Signals use only candles completed before current candle
+        # ----------------------------------
+        # 4. Generate signals
+        # ----------------------------------
+
         if len(positions) < MAX_OPEN_POSITIONS:
 
             for symbol, data in market_data.items():
@@ -933,11 +1084,16 @@ def run_backtest():
                 ):
                     continue
 
+                # Signal only uses candles closed
+                # before the current 15m candle.
+
                 history15 = df15.iloc[
                     max(0, idx - 350):idx
                 ]
 
-                # Higher timeframe candles must be closed
+                # Higher timeframe candles are included
+                # only after their closing timestamps.
+
                 end1 = df1.index.searchsorted(
                     timestamp,
                     side="right"
@@ -985,7 +1141,6 @@ def run_backtest():
                     "LONG",
                     "SHORT"
                 ):
-
                     continue
 
                 equity = equity_value(
@@ -1005,7 +1160,10 @@ def run_backtest():
                     prices
                 )
 
-        # Mark all available markets at candle close
+        # ----------------------------------
+        # 5. Update closing prices
+        # ----------------------------------
+
         for symbol, data in market_data.items():
 
             df = data["15m"]
@@ -1013,7 +1171,8 @@ def run_backtest():
             if timestamp in df.index:
 
                 prices[symbol] = float(
-                    df.loc[timestamp, "close"]
+                    df.loc[timestamp, "close"
+                    ]
                 )
 
         equity = equity_value(
@@ -1035,7 +1194,10 @@ def run_backtest():
                 / peak_equity * 100
             )
 
-    # Close remaining positions at the end of the test
+    # --------------------------------------
+    # 6. Close remaining positions
+    # --------------------------------------
+
     final_timestamp = (
         timeline[-1]
         + pd.Timedelta(minutes=15)
@@ -1050,17 +1212,13 @@ def run_backtest():
             position["entry"]
         )
 
-        if position["side"] == "LONG":
+        exit_price = (
 
-            exit_price = (
-                mark * (1 - SLIPPAGE_RATE)
-            )
+            mark * (1 - SLIPPAGE_RATE)
+            if position["side"] == "LONG"
 
-        else:
-
-            exit_price = (
-                mark * (1 + SLIPPAGE_RATE)
-            )
+            else mark * (1 + SLIPPAGE_RATE)
+        )
 
         balance, trade = close_position(
             position,
@@ -1072,13 +1230,18 @@ def run_backtest():
 
         trades.append(trade)
 
+    # --------------------------------------
+    # 7. Build final report
+    # --------------------------------------
+
     final_equity = balance
 
     stats = summarize_trades(trades)
 
     report = {
 
-        "version": "2.2",
+        "version": "2.3",
+        "strategy_version": STRATEGY_VERSION,
 
         "mode": "BACKTEST_ONLY",
 
@@ -1094,6 +1257,16 @@ def run_backtest():
             "1h",
             "4h"
         ],
+
+        "data_start": min(
+            data["15m"].index[0]
+            for data in market_data.values()
+        ).isoformat(),
+
+        "data_end": max(
+            data["15m"].index[-1]
+            for data in market_data.values()
+        ).isoformat(),
 
         "initial_balance": INITIAL_BALANCE,
 
@@ -1111,7 +1284,8 @@ def run_backtest():
         ),
 
         "return_percent": round(
-            (final_equity / INITIAL_BALANCE - 1) * 100,
+            (final_equity / INITIAL_BALANCE - 1)
+            * 100,
             3
         ),
 
@@ -1123,15 +1297,20 @@ def run_backtest():
 
         "risk_per_trade": RISK_PER_TRADE,
 
-        "max_margin_fraction_per_position": (
-            MAX_MARGIN_FRACTION
-        ),
+        "max_margin_fraction_per_position":
+            MAX_MARGIN_FRACTION,
 
         "max_open_positions": MAX_OPEN_POSITIONS,
 
         "fee_rate_per_side": FEE_RATE,
 
         "slippage_rate_per_side": SLIPPAGE_RATE,
+
+        "stop_atr_multiplier":
+            STOP_ATR_MULTIPLIER,
+
+        "target_atr_multiplier":
+            TARGET_ATR_MULTIPLIER,
 
         "funding_included": False,
 
@@ -1141,20 +1320,48 @@ def run_backtest():
 
         **stats,
 
+        "v22_reference_comparison":
+            compare_with_v22({
+                **{
+                    "final_equity": round(
+                        final_equity, 6
+                    ),
+                    "return_percent": round(
+                        (final_equity / INITIAL_BALANCE - 1)
+                        * 100,
+                        3
+                    ),
+                    "max_drawdown_percent": round(
+                        max_drawdown, 3
+                    )
+                },
+                **stats
+            }),
+
+        "comparison_note": (
+            "V2.2 figures are historical reference values. "
+            "Strict comparison requires replaying both "
+            "strategies on identical saved candle data."
+        ),
+
         "created_at": datetime.now(
             timezone.utc
         ).isoformat()
     }
 
+    # --------------------------------------
+    # 8. Save separate V2.3 files
+    # --------------------------------------
+
     with open(
         REPORT_FILE,
         "w",
         encoding="utf-8"
-    ) as f:
+    ) as file:
 
         json.dump(
             report,
-            f,
+            file,
             ensure_ascii=False,
             indent=2
         )
@@ -1164,9 +1371,7 @@ def run_backtest():
         index=False
     )
 
-    print(
-        "\n========== BACKTEST V2.2 =========="
-    )
+    print("\n========== BACKTEST V2.3 ==========")
 
     print(
         json.dumps(
@@ -1176,12 +1381,11 @@ def run_backtest():
         )
     )
 
-    print(
-        "==================================="
-    )
+    print("===================================")
 
     log(
-        f"Saved {REPORT_FILE} and {TRADES_FILE}"
+        f"Saved {REPORT_FILE} "
+        f"and {TRADES_FILE}"
     )
 
     return report
