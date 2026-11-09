@@ -6,20 +6,26 @@ import json
 import time
 
 from datetime import datetime, timezone
+
 from strategy import (
     generate_signal,
+    prepare_data,
     STRATEGY_VERSION,
     STOP_ATR_MULTIPLIER,
     TARGET_ATR_MULTIPLIER
 )
 
-# ==================================================
-# BITCOIN FUTURES BOT V2.3
-# BACKTEST ONLY - NO REAL ORDERS
+
+# ==========================================================
+# BITCOIN FUTURES BOT V2.3.1
+# DIAGNOSTIC BACKTEST ONLY
+# NO REAL ORDERS
 # Exchange: XT
 # Entry: 15m
 # Confirmation: 1h + 4h
-# ==================================================
+# ==========================================================
+
+BACKTEST_VERSION = "2.3.1"
 
 INITIAL_BALANCE = 10.0
 LEVERAGE = 20
@@ -34,8 +40,8 @@ LOOKBACK_DAYS = 90
 CANDLE_LIMIT = 500
 TIMEFRAME_MS = 15 * 60 * 1000
 
-REPORT_FILE = "backtest_report_v23.json"
-TRADES_FILE = "backtest_trades_v23.csv"
+REPORT_FILE = "backtest_report_v231.json"
+TRADES_FILE = "backtest_trades_v231.csv"
 
 REQUESTED_SYMBOLS = [
     "BTC/USDT",
@@ -50,20 +56,6 @@ REQUESTED_SYMBOLS = [
     "LTC/USDT"
 ]
 
-# V2.2 reference values from the saved historical report.
-# These values are NEVER used in the trading simulation.
-
-V22_REFERENCE = {
-    "final_equity": 2.782705,
-    "return_percent": -72.173,
-    "max_drawdown_percent": 82.059,
-    "closed_trades": 529,
-    "win_rate_percent": 34.22,
-    "profit_factor": 0.7423,
-    "long_net_pnl": -2.829383,
-    "short_net_pnl": -4.387924
-}
-
 exchange = ccxt.xt({
     "enableRateLimit": True,
     "timeout": 30000,
@@ -76,7 +68,8 @@ exchange = ccxt.xt({
 def log(message):
     print(
         f"[{datetime.now(timezone.utc).isoformat()}] "
-        f"{message}"
+        f"{message}",
+        flush=True
     )
 
 
@@ -97,6 +90,10 @@ def resolve_swap_symbol(requested, markets):
 
     return None
 
+
+# ==========================================================
+# MARKET DATA
+# ==========================================================
 
 def fetch_history(symbol):
 
@@ -219,8 +216,6 @@ def resample_ohlcv(df, timeframe, expected_bars):
 
     counts = grouped["close"].count()
 
-    # Keep only complete higher-timeframe candles.
-
     return result[
         counts == expected_bars
     ].dropna()
@@ -288,6 +283,81 @@ def prepare_market_data():
     return market_data
 
 
+# ==========================================================
+# TREND AGE
+# ==========================================================
+
+def calculate_trend_age(df):
+
+    """
+    Reproduces the trend definition used by strategy.py.
+
+    Returns:
+        trend
+        consecutive_trend_bars
+
+    BULLISH and BEARISH are calculated using:
+        close vs EMA200
+        EMA50 vs EMA200
+        EMA50 vs EMA50 five bars earlier
+    """
+
+    try:
+
+        data = prepare_data(df)
+
+        if len(data) < 210:
+            return "INSUFFICIENT_DATA", 0
+
+        bullish = (
+            (data["close"] > data["ema200"])
+            & (data["ema50"] > data["ema200"])
+            & (data["ema50"] > data["ema50"].shift(5))
+        )
+
+        bearish = (
+            (data["close"] < data["ema200"])
+            & (data["ema50"] < data["ema200"])
+            & (data["ema50"] < data["ema50"].shift(5))
+        )
+
+        states = np.where(
+            bullish,
+            "BULLISH",
+            np.where(
+                bearish,
+                "BEARISH",
+                "SIDEWAYS"
+            )
+        )
+
+        current = states[-1]
+
+        if current == "SIDEWAYS":
+            return current, 0
+
+        age = 0
+
+        for state in reversed(states):
+
+            if state != current:
+                break
+
+            age += 1
+
+        return current, age
+
+    except Exception as exc:
+
+        log(f"Trend age error: {exc}")
+
+        return "UNKNOWN", 0
+
+
+# ==========================================================
+# POSITION ACCOUNTING
+# ==========================================================
+
 def unrealized_pnl(position, price):
 
     if position["side"] == "LONG":
@@ -316,6 +386,75 @@ def equity_value(balance, positions, prices):
         )
 
     return total
+
+
+def margin_used(positions):
+
+    return sum(
+        p["margin"]
+        for p in positions.values()
+    )
+
+
+def update_excursions(position, candle):
+
+    """
+    OHLC-based MFE and MAE.
+
+    These are candle-extreme estimates. Exact intrabar
+    ordering cannot be recovered from OHLC data.
+    """
+
+    high = float(candle["high"])
+    low = float(candle["low"])
+
+    entry = position["entry"]
+    quantity = position["quantity"]
+
+    if position["side"] == "LONG":
+
+        favorable = max(0.0, high - entry)
+        adverse = max(0.0, entry - low)
+
+    else:
+
+        favorable = max(0.0, entry - low)
+        adverse = max(0.0, high - entry)
+
+    favorable_pnl = favorable * quantity
+    adverse_pnl = adverse * quantity
+
+    position["mfe_price"] = max(
+        position["mfe_price"],
+        favorable
+    )
+
+    position["mae_price"] = max(
+        position["mae_price"],
+        adverse
+    )
+
+    position["mfe_pnl"] = max(
+        position["mfe_pnl"],
+        favorable_pnl
+    )
+
+    position["mae_pnl"] = max(
+        position["mae_pnl"],
+        adverse_pnl
+    )
+
+    risk = position["initial_risk_amount"]
+
+    if risk > 0:
+
+        position["mfe_r"] = (
+            position["mfe_pnl"] / risk
+        )
+
+        position["mae_r"] = (
+            position["mae_pnl"] / risk
+        )
 
 
 def adverse_equity(
@@ -357,120 +496,22 @@ def adverse_equity(
     return total
 
 
-def margin_used(positions):
-
-    return sum(
-        p["margin"]
-        for p in positions.values()
-    )
-
-
-def close_position(
-    position,
-    exit_price,
-    timestamp,
-    reason,
-    balance
-):
-
-    side = position["side"]
-
-    quantity = position["quantity"]
-    entry = position["entry"]
-
-    if side == "LONG":
-
-        gross_pnl = (
-            exit_price - entry
-        ) * quantity
-
-    else:
-
-        gross_pnl = (
-            entry - exit_price
-        ) * quantity
-
-    exit_fee = (
-        exit_price * quantity * FEE_RATE
-    )
-
-    balance += gross_pnl - exit_fee
-
-    net_pnl = (
-        gross_pnl
-        - exit_fee
-        - position["entry_fee"]
-    )
-
-    trade = {
-
-        "strategy_version": STRATEGY_VERSION,
-
-        "symbol": position["symbol"],
-        "side": side,
-
-        "entry_time": position["entry_time"],
-        "exit_time": timestamp.isoformat(),
-
-        "entry": round(entry, 10),
-        "exit": round(exit_price, 10),
-
-        "stop_loss": round(
-            position["stop_loss"], 10
-        ),
-
-        "take_profit": round(
-            position["take_profit"], 10
-        ),
-
-        "quantity": round(quantity, 10),
-
-        "margin": round(
-            position["margin"], 6
-        ),
-
-        "gross_pnl": round(
-            gross_pnl, 6
-        ),
-
-        "entry_fee": round(
-            position["entry_fee"], 6
-        ),
-
-        "exit_fee": round(
-            exit_fee, 6
-        ),
-
-        "net_pnl": round(
-            net_pnl, 6
-        ),
-
-        "entry_rsi": position.get("entry_rsi"),
-        "entry_adx": position.get("entry_adx"),
-
-        "entry_body_ratio": position.get(
-            "entry_body_ratio"
-        ),
-
-        "entry_trend_1h": position.get(
-            "entry_trend_1h"
-        ),
-
-        "entry_trend_4h": position.get(
-            "entry_trend_4h"
-        ),
-
-        "entry_reason": position.get(
-            "entry_reason"
-        ),
-
-        "reason": reason
-    }
-
-    return balance, trade
-
+# ==========================================================
+# EXIT EXECUTION
+# ==========================================================
 
 def check_exit(position, candle):
+
+    """
+    Returns:
+        executed_exit_price
+        exit_reason
+        raw_exit_price
+
+    Conservative rule:
+    If SL and TP are both touched in the same candle,
+    SL is assumed to happen first.
+    """
 
     side = position["side"]
 
@@ -486,10 +527,6 @@ def check_exit(position, candle):
         stop_hit = low <= stop
         target_hit = high >= target
 
-        # Conservative rule:
-        # If both levels hit in one candle,
-        # assume stop loss happens first.
-
         if stop_hit:
 
             raw_exit = min(
@@ -497,10 +534,11 @@ def check_exit(position, candle):
                 stop
             )
 
-            return (
-                raw_exit * (1 - SLIPPAGE_RATE),
-                "STOP_LOSS"
+            executed = (
+                raw_exit * (1 - SLIPPAGE_RATE)
             )
+
+            return executed, "STOP_LOSS", raw_exit
 
         if target_hit:
 
@@ -509,10 +547,11 @@ def check_exit(position, candle):
                 target
             )
 
-            return (
-                raw_exit * (1 - SLIPPAGE_RATE),
-                "TAKE_PROFIT"
+            executed = (
+                raw_exit * (1 - SLIPPAGE_RATE)
             )
+
+            return executed, "TAKE_PROFIT", raw_exit
 
     else:
 
@@ -526,10 +565,11 @@ def check_exit(position, candle):
                 stop
             )
 
-            return (
-                raw_exit * (1 + SLIPPAGE_RATE),
-                "STOP_LOSS"
+            executed = (
+                raw_exit * (1 + SLIPPAGE_RATE)
             )
+
+            return executed, "STOP_LOSS", raw_exit
 
         if target_hit:
 
@@ -538,19 +578,29 @@ def check_exit(position, candle):
                 target
             )
 
-            return (
-                raw_exit * (1 + SLIPPAGE_RATE),
-                "TAKE_PROFIT"
+            executed = (
+                raw_exit * (1 + SLIPPAGE_RATE)
             )
 
-    return None, None
+            return executed, "TAKE_PROFIT", raw_exit
 
+    return None, None, None
+
+
+# ==========================================================
+# OPEN POSITION
+# ==========================================================
 
 def open_position(
     symbol,
     signal,
     candle,
     timestamp,
+    signal_timestamp,
+    signal_ema20,
+    signal_close,
+    trend_age_1h,
+    trend_age_4h,
     equity,
     balance,
     positions,
@@ -573,7 +623,7 @@ def open_position(
     ):
         return balance
 
-    # Simulated market execution with slippage.
+    # Entry slippage.
 
     entry = (
         raw_entry * (1 + SLIPPAGE_RATE)
@@ -618,9 +668,6 @@ def open_position(
         estimated_exit = (
             stop * (1 + SLIPPAGE_RATE)
         )
-
-    # Include both entry and estimated exit fees
-    # in the risk calculation.
 
     estimated_cost_per_unit = (
         entry * FEE_RATE
@@ -684,40 +731,82 @@ def open_position(
 
     balance -= entry_fee
 
+    initial_risk_amount = (
+        quantity * estimated_loss_per_unit
+    )
+
+    distance_ema_atr = (
+        abs(entry - signal_ema20) / atr
+        if signal_ema20 and atr > 0
+        else None
+    )
+
+    atr_percent = (
+        atr / signal_close * 100
+        if signal_close > 0
+        else None
+    )
+
+    stop_distance_percent = (
+        stop_distance / entry * 100
+    )
+
+    entry_slippage_cost = (
+        abs(entry - raw_entry) * quantity
+    )
+
     positions[symbol] = {
 
         "symbol": symbol,
         "side": side,
 
         "entry": entry,
+        "raw_entry": raw_entry,
+
         "quantity": quantity,
 
         "stop_loss": stop,
         "take_profit": target,
 
+        "stop_distance": stop_distance,
+
         "margin": margin,
         "entry_fee": entry_fee,
 
+        "entry_slippage_cost": entry_slippage_cost,
+
+        "initial_risk_amount": initial_risk_amount,
+
         "entry_time": timestamp.isoformat(),
+        "signal_time": signal_timestamp.isoformat(),
 
         "entry_rsi": signal.get("rsi"),
         "entry_adx": signal.get("adx"),
+        "entry_body_ratio": signal.get("body_ratio"),
 
-        "entry_body_ratio": signal.get(
-            "body_ratio"
-        ),
+        "entry_trend_1h": signal.get("trend_1h"),
+        "entry_trend_4h": signal.get("trend_4h"),
 
-        "entry_trend_1h": signal.get(
-            "trend_1h"
-        ),
+        "entry_reason": signal.get("reason"),
 
-        "entry_trend_4h": signal.get(
-            "trend_4h"
-        ),
+        "entry_ema20": signal_ema20,
+        "entry_atr": atr,
 
-        "entry_reason": signal.get(
-            "reason"
-        )
+        "entry_distance_ema20_atr": distance_ema_atr,
+        "entry_atr_percent": atr_percent,
+        "entry_stop_distance_percent": stop_distance_percent,
+
+        "trend_age_1h_bars": trend_age_1h,
+        "trend_age_4h_bars": trend_age_4h,
+
+        "mfe_price": 0.0,
+        "mae_price": 0.0,
+
+        "mfe_pnl": 0.0,
+        "mae_pnl": 0.0,
+
+        "mfe_r": 0.0,
+        "mae_r": 0.0
     }
 
     prices[symbol] = entry
@@ -727,12 +816,233 @@ def open_position(
         f"entry={entry:.8f} "
         f"SL={stop:.8f} "
         f"TP={target:.8f} "
-        f"qty={quantity:.8f} "
-        f"margin={margin:.4f}"
+        f"ATR%={atr_percent:.4f} "
+        f"EMA-distance-ATR={distance_ema_atr:.3f}"
     )
 
     return balance
 
+
+# ==========================================================
+# CLOSE POSITION
+# ==========================================================
+
+def close_position(
+    position,
+    exit_price,
+    raw_exit_price,
+    timestamp,
+    reason,
+    balance
+):
+
+    side = position["side"]
+
+    quantity = position["quantity"]
+    entry = position["entry"]
+    raw_entry = position["raw_entry"]
+
+    if side == "LONG":
+
+        gross_pnl = (
+            exit_price - entry
+        ) * quantity
+
+        gross_before_slippage = (
+            raw_exit_price - raw_entry
+        ) * quantity
+
+    else:
+
+        gross_pnl = (
+            entry - exit_price
+        ) * quantity
+
+        gross_before_slippage = (
+            raw_entry - raw_exit_price
+        ) * quantity
+
+    exit_fee = (
+        exit_price * quantity * FEE_RATE
+    )
+
+    exit_slippage_cost = (
+        abs(exit_price - raw_exit_price) * quantity
+    )
+
+    balance += gross_pnl - exit_fee
+
+    net_pnl = (
+        gross_pnl
+        - exit_fee
+        - position["entry_fee"]
+    )
+
+    total_fees = (
+        position["entry_fee"] + exit_fee
+    )
+
+    total_slippage = (
+        position["entry_slippage_cost"]
+        + exit_slippage_cost
+    )
+
+    initial_risk = position["initial_risk_amount"]
+
+    net_r = (
+        net_pnl / initial_risk
+        if initial_risk > 0
+        else None
+    )
+
+    duration_minutes = (
+        pd.Timestamp(timestamp)
+        - pd.Timestamp(position["entry_time"])
+    ).total_seconds() / 60
+
+    trade = {
+
+        "backtest_version": BACKTEST_VERSION,
+        "strategy_version": STRATEGY_VERSION,
+
+        "symbol": position["symbol"],
+        "side": side,
+
+        "signal_time": position["signal_time"],
+        "entry_time": position["entry_time"],
+        "exit_time": timestamp.isoformat(),
+
+        "duration_minutes": round(
+            duration_minutes, 2
+        ),
+
+        "raw_entry": round(raw_entry, 10),
+        "entry": round(entry, 10),
+
+        "raw_exit": round(raw_exit_price, 10),
+        "exit": round(exit_price, 10),
+
+        "stop_loss": round(
+            position["stop_loss"], 10
+        ),
+
+        "take_profit": round(
+            position["take_profit"], 10
+        ),
+
+        "quantity": round(quantity, 10),
+
+        "margin": round(
+            position["margin"], 6
+        ),
+
+        "initial_risk_amount": round(
+            initial_risk, 8
+        ),
+
+        "gross_pnl_before_slippage": round(
+            gross_before_slippage, 8
+        ),
+
+        "gross_pnl_after_slippage": round(
+            gross_pnl, 8
+        ),
+
+        "entry_fee": round(
+            position["entry_fee"], 8
+        ),
+
+        "exit_fee": round(
+            exit_fee, 8
+        ),
+
+        "total_fees": round(
+            total_fees, 8
+        ),
+
+        "entry_slippage_cost": round(
+            position["entry_slippage_cost"], 8
+        ),
+
+        "exit_slippage_cost": round(
+            exit_slippage_cost, 8
+        ),
+
+        "total_slippage_cost": round(
+            total_slippage, 8
+        ),
+
+        "net_pnl": round(
+            net_pnl, 8
+        ),
+
+        "net_r": (
+            round(net_r, 6)
+            if net_r is not None
+            else None
+        ),
+
+        "entry_rsi": position["entry_rsi"],
+        "entry_adx": position["entry_adx"],
+
+        "entry_body_ratio": position["entry_body_ratio"],
+
+        "entry_trend_1h": position["entry_trend_1h"],
+        "entry_trend_4h": position["entry_trend_4h"],
+
+        "entry_ema20": position["entry_ema20"],
+        "entry_atr": position["entry_atr"],
+
+        "entry_distance_ema20_atr":
+            position["entry_distance_ema20_atr"],
+
+        "entry_atr_percent":
+            position["entry_atr_percent"],
+
+        "entry_stop_distance_percent":
+            position["entry_stop_distance_percent"],
+
+        "trend_age_1h_bars":
+            position["trend_age_1h_bars"],
+
+        "trend_age_4h_bars":
+            position["trend_age_4h_bars"],
+
+        "mfe_price": round(
+            position["mfe_price"], 10
+        ),
+
+        "mae_price": round(
+            position["mae_price"], 10
+        ),
+
+        "mfe_pnl": round(
+            position["mfe_pnl"], 8
+        ),
+
+        "mae_pnl": round(
+            position["mae_pnl"], 8
+        ),
+
+        "mfe_r": round(
+            position["mfe_r"], 6
+        ),
+
+        "mae_r": round(
+            position["mae_r"], 6
+        ),
+
+        "entry_reason": position["entry_reason"],
+
+        "reason": reason
+    }
+
+    return balance, trade
+
+
+# ==========================================================
+# STATISTICS
+# ==========================================================
 
 def profit_factor(items):
 
@@ -745,7 +1055,7 @@ def profit_factor(items):
     losses = abs(sum(
         t["net_pnl"]
         for t in items
-        if t["net_pnl"] <= 0
+        if t["net_pnl"] < 0
     ))
 
     if losses == 0:
@@ -755,6 +1065,194 @@ def profit_factor(items):
         profits / losses,
         4
     )
+
+
+def calculate_streaks(trades):
+
+    ordered = sorted(
+        trades,
+        key=lambda t: t["exit_time"]
+    )
+
+    current = 0
+    longest = 0
+    current_loss_sum = 0.0
+    longest_loss_sum = 0.0
+
+    for trade in ordered:
+
+        if trade["net_pnl"] <= 0:
+
+            current += 1
+            current_loss_sum += trade["net_pnl"]
+
+            if current > longest:
+
+                longest = current
+                longest_loss_sum = current_loss_sum
+
+        else:
+
+            current = 0
+            current_loss_sum = 0.0
+
+    return {
+        "longest_losing_streak": longest,
+        "loss_during_longest_streak": round(
+            longest_loss_sum, 6
+        )
+    }
+
+
+def group_statistics(trades, key):
+
+    result = {}
+
+    values = sorted(
+        set(
+            str(t.get(key))
+            for t in trades
+            if t.get(key) is not None
+        )
+    )
+
+    for value in values:
+
+        items = [
+            t for t in trades
+            if str(t.get(key)) == value
+        ]
+
+        wins = [
+            t for t in items
+            if t["net_pnl"] > 0
+        ]
+
+        result[value] = {
+
+            "trades": len(items),
+
+            "wins": len(wins),
+
+            "win_rate_percent": round(
+                100 * len(wins) / len(items),
+                2
+            ) if items else 0,
+
+            "net_pnl": round(
+                sum(t["net_pnl"] for t in items),
+                6
+            ),
+
+            "average_net_r": round(
+                float(np.mean([
+                    t["net_r"]
+                    for t in items
+                    if t["net_r"] is not None
+                ])),
+                6
+            ) if any(
+                t["net_r"] is not None
+                for t in items
+            ) else None,
+
+            "profit_factor": profit_factor(items)
+        }
+
+    return result
+
+
+def side_statistics(trades, side):
+
+    items = [
+        t for t in trades
+        if t["side"] == side
+    ]
+
+    winners = [
+        t for t in items
+        if t["net_pnl"] > 0
+    ]
+
+    losers = [
+        t for t in items
+        if t["net_pnl"] <= 0
+    ]
+
+    return {
+
+        "trades": len(items),
+
+        "wins": len(winners),
+        "losses": len(losers),
+
+        "win_rate_percent": round(
+            100 * len(winners) / len(items),
+            2
+        ) if items else 0,
+
+        "net_pnl": round(
+            sum(t["net_pnl"] for t in items),
+            6
+        ),
+
+        "gross_pnl_after_slippage": round(
+            sum(
+                t["gross_pnl_after_slippage"]
+                for t in items
+            ),
+            6
+        ),
+
+        "total_fees": round(
+            sum(t["total_fees"] for t in items),
+            6
+        ),
+
+        "total_slippage_cost": round(
+            sum(t["total_slippage_cost"] for t in items),
+            6
+        ),
+
+        "average_win": round(
+            float(np.mean([
+                t["net_pnl"] for t in winners
+            ])),
+            6
+        ) if winners else None,
+
+        "average_loss": round(
+            float(np.mean([
+                t["net_pnl"] for t in losers
+            ])),
+            6
+        ) if losers else None,
+
+        "average_net_r": round(
+            float(np.mean([
+                t["net_r"]
+                for t in items
+                if t["net_r"] is not None
+            ])),
+            6
+        ) if items else None,
+
+        "profit_factor": profit_factor(items),
+
+        "average_mfe_r": round(
+            float(np.mean([
+                t["mfe_r"] for t in items
+            ])),
+            6
+        ) if items else None,
+
+        "average_mae_r": round(
+            float(np.mean([
+                t["mae_r"] for t in items
+            ])),
+            6
+        ) if items else None
+    }
 
 
 def summarize_trades(trades):
@@ -769,92 +1267,6 @@ def summarize_trades(trades):
         if t["net_pnl"] <= 0
     ]
 
-    def side_stats(side):
-
-        items = [
-            t for t in trades
-            if t["side"] == side
-        ]
-
-        return {
-
-            "trades": len(items),
-
-            "wins": sum(
-                t["net_pnl"] > 0
-                for t in items
-            ),
-
-            "losses": sum(
-                t["net_pnl"] <= 0
-                for t in items
-            ),
-
-            "net_pnl": round(
-                sum(t["net_pnl"] for t in items),
-                6
-            ),
-
-            "profit_factor": profit_factor(items)
-        }
-
-    by_symbol = {}
-
-    for symbol in sorted(
-        set(t["symbol"] for t in trades)
-    ):
-
-        items = [
-            t for t in trades
-            if t["symbol"] == symbol
-        ]
-
-        by_symbol[symbol] = {
-
-            "trades": len(items),
-
-            "wins": sum(
-                t["net_pnl"] > 0
-                for t in items
-            ),
-
-            "net_pnl": round(
-                sum(t["net_pnl"] for t in items),
-                6
-            ),
-
-            "profit_factor": profit_factor(items)
-        }
-
-    by_exit_reason = {}
-
-    for reason in sorted(
-        set(t["reason"] for t in trades)
-    ):
-
-        items = [
-            t for t in trades
-            if t["reason"] == reason
-        ]
-
-        by_exit_reason[reason] = {
-
-            "trades": len(items),
-
-            "net_pnl": round(
-                sum(t["net_pnl"] for t in items),
-                6
-            )
-        }
-
-    gross_profit = sum(
-        t["net_pnl"] for t in winners
-    )
-
-    gross_loss = abs(sum(
-        t["net_pnl"] for t in losers
-    ))
-
     return {
 
         "closed_trades": len(trades),
@@ -867,77 +1279,73 @@ def summarize_trades(trades):
             2
         ) if trades else 0,
 
-        "profit_factor": (
-            round(gross_profit / gross_loss, 4)
-            if gross_loss else None
+        "profit_factor": profit_factor(trades),
+
+        "net_pnl": round(
+            sum(t["net_pnl"] for t in trades),
+            6
         ),
 
-        "gross_profit_net": round(
-            gross_profit, 6
+        "total_fees": round(
+            sum(t["total_fees"] for t in trades),
+            6
         ),
 
-        "gross_loss_net": round(
-            gross_loss, 6
+        "total_slippage_cost": round(
+            sum(t["total_slippage_cost"] for t in trades),
+            6
         ),
 
-        "long": side_stats("LONG"),
-        "short": side_stats("SHORT"),
+        "gross_pnl_before_slippage": round(
+            sum(
+                t["gross_pnl_before_slippage"]
+                for t in trades
+            ),
+            6
+        ),
 
-        "by_symbol": by_symbol,
+        "gross_pnl_after_slippage": round(
+            sum(
+                t["gross_pnl_after_slippage"]
+                for t in trades
+            ),
+            6
+        ),
 
-        "by_exit_reason": by_exit_reason
+        "long": side_statistics(trades, "LONG"),
+
+        "short": side_statistics(trades, "SHORT"),
+
+        "by_symbol": group_statistics(
+            trades,
+            "symbol"
+        ),
+
+        "by_exit_reason": group_statistics(
+            trades,
+            "reason"
+        ),
+
+        "by_month": group_statistics(
+            trades,
+            "exit_month"
+        ),
+
+        **calculate_streaks(trades)
     }
 
 
-def compare_with_v22(report):
-
-    comparison = {}
-
-    current_values = {
-
-        "final_equity": report["final_equity"],
-        "return_percent": report["return_percent"],
-        "max_drawdown_percent": report[
-            "max_drawdown_percent"
-        ],
-        "closed_trades": report["closed_trades"],
-        "win_rate_percent": report["win_rate_percent"],
-        "profit_factor": report["profit_factor"],
-        "long_net_pnl": report["long"]["net_pnl"],
-        "short_net_pnl": report["short"]["net_pnl"]
-    }
-
-    for key, current in current_values.items():
-
-        reference = V22_REFERENCE[key]
-
-        if current is None:
-
-            difference = None
-
-        else:
-
-            difference = round(
-                current - reference,
-                4
-            )
-
-        comparison[key] = {
-
-            "v22_reference": reference,
-            "v23_current": current,
-            "difference": difference
-        }
-
-    return comparison
-
+# ==========================================================
+# MAIN BACKTEST
+# ==========================================================
 
 def run_backtest():
 
     if STRATEGY_VERSION != "2.3":
 
         raise RuntimeError(
-            "strategy.py is not version 2.3"
+            "strategy.py must remain version 2.3 "
+            "for this diagnostic test."
         )
 
     market_data = prepare_market_data()
@@ -971,16 +1379,16 @@ def run_backtest():
     max_drawdown = 0.0
 
     log(
-        f"Starting V2.3 backtest: "
+        f"Starting diagnostic V{BACKTEST_VERSION}: "
         f"{len(timeline)} timestamps, "
         f"{len(market_data)} markets"
     )
 
     for timestamp in timeline:
 
-        # ----------------------------------
-        # 1. Update opening prices
-        # ----------------------------------
+        # --------------------------------------
+        # 1. Update current candle opening prices
+        # --------------------------------------
 
         for symbol, data in market_data.items():
 
@@ -992,9 +1400,9 @@ def run_backtest():
                     df.loc[timestamp, "open"]
                 )
 
-        # ----------------------------------
-        # 2. Exit existing positions
-        # ----------------------------------
+        # --------------------------------------
+        # 2. Update and exit existing positions
+        # --------------------------------------
 
         for symbol in list(positions.keys()):
 
@@ -1003,32 +1411,47 @@ def run_backtest():
             if timestamp not in df.index:
                 continue
 
-            exit_price, reason = check_exit(
+            candle = df.loc[timestamp]
+
+            update_excursions(
                 positions[symbol],
-                df.loc[timestamp]
+                candle
+            )
+
+            exit_price, reason, raw_exit = check_exit(
+                positions[symbol],
+                candle
             )
 
             if exit_price is not None:
 
+                position = positions.pop(symbol)
+
                 balance, trade = close_position(
-                    positions.pop(symbol),
+                    position,
                     exit_price,
+                    raw_exit,
                     timestamp,
                     reason,
                     balance
                 )
 
+                trade["exit_month"] = (
+                    pd.Timestamp(timestamp).strftime("%Y-%m")
+                )
+
                 trades.append(trade)
 
                 log(
-                    f"CLOSE {symbol} "
-                    f"{reason} "
-                    f"net={trade['net_pnl']:.5f}"
+                    f"CLOSE {symbol} {reason} "
+                    f"net={trade['net_pnl']:.5f} "
+                    f"MFE_R={trade['mfe_r']:.3f} "
+                    f"MAE_R={trade['mae_r']:.3f}"
                 )
 
-        # ----------------------------------
+        # --------------------------------------
         # 3. Calculate adverse drawdown
-        # ----------------------------------
+        # --------------------------------------
 
         adverse = adverse_equity(
             balance,
@@ -1038,13 +1461,15 @@ def run_backtest():
             prices
         )
 
+        current_equity = equity_value(
+            balance,
+            positions,
+            prices
+        )
+
         peak_equity = max(
             peak_equity,
-            equity_value(
-                balance,
-                positions,
-                prices
-            )
+            current_equity
         )
 
         if peak_equity > 0:
@@ -1055,9 +1480,9 @@ def run_backtest():
                 / peak_equity * 100
             )
 
-        # ----------------------------------
-        # 4. Generate signals
-        # ----------------------------------
+        # --------------------------------------
+        # 4. Generate signals from closed candles
+        # --------------------------------------
 
         if len(positions) < MAX_OPEN_POSITIONS:
 
@@ -1084,15 +1509,13 @@ def run_backtest():
                 ):
                     continue
 
-                # Signal only uses candles closed
-                # before the current 15m candle.
+                # Only previously closed 15m candles.
 
                 history15 = df15.iloc[
                     max(0, idx - 350):idx
                 ]
 
-                # Higher timeframe candles are included
-                # only after their closing timestamps.
+                # Only completed 1h and 4h candles.
 
                 end1 = df1.index.searchsorted(
                     timestamp,
@@ -1117,7 +1540,6 @@ def run_backtest():
                     len(history1),
                     len(history4)
                 ) < 210:
-
                     continue
 
                 try:
@@ -1143,6 +1565,31 @@ def run_backtest():
                 ):
                     continue
 
+                # Diagnostic values from the last closed
+                # 15m signal candle.
+
+                signal_data = prepare_data(history15)
+
+                signal_candle = signal_data.iloc[-1]
+
+                signal_ema20 = float(
+                    signal_candle["ema20"]
+                )
+
+                signal_close = float(
+                    signal_candle["close"]
+                )
+
+                signal_timestamp = history15.index[-1]
+
+                trend1, age1 = calculate_trend_age(
+                    history1
+                )
+
+                trend4, age4 = calculate_trend_age(
+                    history4
+                )
+
                 equity = equity_value(
                     balance,
                     positions,
@@ -1152,17 +1599,68 @@ def run_backtest():
                 balance = open_position(
                     symbol,
                     signal,
-                    df15.iloc[idx],
+                    df15.loc[timestamp],
                     timestamp,
+                    signal_timestamp,
+                    signal_ema20,
+                    signal_close,
+                    age1,
+                    age4,
                     equity,
                     balance,
                     positions,
                     prices
                 )
 
-        # ----------------------------------
-        # 5. Update closing prices
-        # ----------------------------------
+                # ----------------------------------
+                # 5. IMPORTANT: Check the entry candle
+                # ----------------------------------
+
+                # OHLC cannot reveal exact intrabar order.
+                # If SL and TP are both touched, SL wins.
+
+                if symbol in positions:
+
+                    entry_candle = df15.loc[timestamp]
+
+                    update_excursions(
+                        positions[symbol],
+                        entry_candle
+                    )
+
+                    exit_price, reason, raw_exit = check_exit(
+                        positions[symbol],
+                        entry_candle
+                    )
+
+                    if exit_price is not None:
+
+                        position = positions.pop(symbol)
+
+                        balance, trade = close_position(
+                            position,
+                            exit_price,
+                            raw_exit,
+                            timestamp,
+                            reason,
+                            balance
+                        )
+
+                        trade["exit_month"] = (
+                            pd.Timestamp(timestamp).strftime("%Y-%m")
+                        )
+
+                        trades.append(trade)
+
+                        log(
+                            f"SAME-CANDLE CLOSE {symbol} "
+                            f"{reason} "
+                            f"net={trade['net_pnl']:.5f}"
+                        )
+
+        # --------------------------------------
+        # 6. Update closing prices and drawdown
+        # --------------------------------------
 
         for symbol, data in market_data.items():
 
@@ -1171,8 +1669,7 @@ def run_backtest():
             if timestamp in df.index:
 
                 prices[symbol] = float(
-                    df.loc[timestamp, "close"
-                    ]
+                    df.loc[timestamp, "close"]
                 )
 
         equity = equity_value(
@@ -1194,9 +1691,9 @@ def run_backtest():
                 / peak_equity * 100
             )
 
-    # --------------------------------------
-    # 6. Close remaining positions
-    # --------------------------------------
+    # ------------------------------------------
+    # 7. Close remaining positions at test end
+    # ------------------------------------------
 
     final_timestamp = (
         timeline[-1]
@@ -1213,26 +1710,29 @@ def run_backtest():
         )
 
         exit_price = (
-
             mark * (1 - SLIPPAGE_RATE)
             if position["side"] == "LONG"
-
             else mark * (1 + SLIPPAGE_RATE)
         )
 
         balance, trade = close_position(
             position,
             exit_price,
+            mark,
             final_timestamp,
             "END_OF_TEST",
             balance
         )
 
+        trade["exit_month"] = (
+            pd.Timestamp(final_timestamp).strftime("%Y-%m")
+        )
+
         trades.append(trade)
 
-    # --------------------------------------
-    # 7. Build final report
-    # --------------------------------------
+    # ------------------------------------------
+    # 8. Final report
+    # ------------------------------------------
 
     final_equity = balance
 
@@ -1240,7 +1740,7 @@ def run_backtest():
 
     report = {
 
-        "version": "2.3",
+        "backtest_version": BACKTEST_VERSION,
         "strategy_version": STRATEGY_VERSION,
 
         "mode": "BACKTEST_ONLY",
@@ -1267,6 +1767,15 @@ def run_backtest():
             data["15m"].index[-1]
             for data in market_data.values()
         ).isoformat(),
+
+        "first_signal_or_trade_time": (
+            min(
+                t["entry_time"]
+                for t in trades
+            )
+            if trades
+            else None
+        ),
 
         "initial_balance": INITIAL_BALANCE,
 
@@ -1316,42 +1825,32 @@ def run_backtest():
 
         "liquidation_model_included": False,
 
+        "mfe_mae_method": (
+            "OHLC candle extremes; exact intrabar "
+            "sequence is unknown"
+        ),
+
+        "same_candle_exit_check": True,
+
+        "same_candle_sl_tp_rule": "STOP_LOSS_FIRST",
+
+        "trend_age_method": (
+            "Consecutive bars matching strategy.py "
+            "EMA200 and EMA50 trend definition"
+        ),
+
         "end_positions_closed": True,
 
         **stats,
-
-        "v22_reference_comparison":
-            compare_with_v22({
-                **{
-                    "final_equity": round(
-                        final_equity, 6
-                    ),
-                    "return_percent": round(
-                        (final_equity / INITIAL_BALANCE - 1)
-                        * 100,
-                        3
-                    ),
-                    "max_drawdown_percent": round(
-                        max_drawdown, 3
-                    )
-                },
-                **stats
-            }),
-
-        "comparison_note": (
-            "V2.2 figures are historical reference values. "
-            "Strict comparison requires replaying both "
-            "strategies on identical saved candle data."
-        ),
 
         "created_at": datetime.now(
             timezone.utc
         ).isoformat()
     }
 
-    # --------------------------------------
-    # 8. Save separate V2.3 files
-    # --------------------------------------
+    # ------------------------------------------
+    # 9. Save new independent report files
+    # ------------------------------------------
 
     with open(
         REPORT_FILE,
@@ -1371,7 +1870,7 @@ def run_backtest():
         index=False
     )
 
-    print("\n========== BACKTEST V2.3 ==========")
+    print("\n========== BACKTEST V2.3.1 ==========")
 
     print(
         json.dumps(
@@ -1381,7 +1880,7 @@ def run_backtest():
         )
     )
 
-    print("===================================")
+    print("=====================================")
 
     log(
         f"Saved {REPORT_FILE} "
