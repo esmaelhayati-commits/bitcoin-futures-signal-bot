@@ -1,520 +1,177 @@
-
 import numpy as np
 import pandas as pd
 
-# ==========================================
-# BITCOIN FUTURES STRATEGY V2.3
-# XT USDT SWAPS
-# Entry: 15m
-# Confirmation: 1h + 4h
-# Backtest compatible
-# ==========================================
+STRATEGY_VERSION = "SMC-V3.0"
+MIN_CANDLES = 120
 
-STRATEGY_VERSION = "2.3"
+SWING_LOOKBACK = 5        # تعداد کندل برای تشخیص سویینگ‌های سقف و کف
+FVG_THRESHOLD_PCT = 0.0015 # حداقل سایز گپ قیمت (0.15 درصد)
+RR_RATIO = 2.5            # نسبت سود به زیان استاندارد اسمارت مانی
 
-MIN_CANDLES = 210
-
-ATR_PERIOD = 14
-RSI_PERIOD = 14
-ADX_PERIOD = 14
-
-STOP_ATR_MULTIPLIER = 1.5
-TARGET_ATR_MULTIPLIER = 3.0
-
-MIN_ADX = 18
-MIN_RSI_LONG = 50
-MAX_RSI_LONG = 68
-MIN_RSI_SHORT = 32
-MAX_RSI_SHORT = 50
-
-MAX_ENTRY_DISTANCE_ATR = 0.8
-PULLBACK_TOLERANCE_ATR = 0.25
-MIN_CANDLE_BODY_RATIO = 0.35
-
-
-def validate_data(df):
-    required = [
-        "open", "high", "low", "close", "volume"
-    ]
-
+def validate_data(df: pd.DataFrame) -> pd.DataFrame:
+    required = ["open", "high", "low", "close", "volume"]
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a DataFrame")
-
-    missing = [
-        col for col in required if col not in df.columns
-    ]
-
-    if missing:
-        raise ValueError(f"Missing columns: {missing}")
-
-    out = df[required].copy()
-
     for col in required:
-        out[col] = pd.to_numeric(
-            out[col], errors="coerce"
-        )
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    out = df[required].dropna()
+    return out[(out["high"] >= out["low"]) & (out["close"] > 0)]
 
-    out = out.replace(
-        [np.inf, -np.inf], np.nan
-    ).dropna()
+def identify_swings(df: pd.DataFrame, lookback: int = SWING_LOOKBACK):
+    """شناسایی سقف‌ها و کف‌های سوئینگ (Swing Highs / Swing Lows)"""
+    highs = df["high"]
+    lows = df["low"]
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(lookback, len(df) - lookback):
+        if all(highs.iloc[i] > highs.iloc[i - j] for j in range(1, lookback + 1)) and \
+           all(highs.iloc[i] > highs.iloc[i + j] for j in range(1, lookback + 1)):
+            swing_highs.append((df.index[i], highs.iloc[i]))
+            
+        if all(lows.iloc[i] < lows.iloc[i - j] for j in range(1, lookback + 1)) and \
+           all(lows.iloc[i] < lows.iloc[i + j] for j in range(1, lookback + 1)):
+            swing_lows.append((df.index[i], lows.iloc[i]))
+            
+    return swing_highs, swing_lows
 
-    out = out[
-        (out["open"] > 0)
-        & (out["high"] > 0)
-        & (out["low"] > 0)
-        & (out["close"] > 0)
-        & (out["volume"] >= 0)
-        & (out["high"] >= out["low"])
-    ]
+def detect_fvg(df: pd.DataFrame):
+    """تشخیص شکاف نقدینگی و ارزش منصفانه (Fair Value Gap)"""
+    fvg_bullish = []
+    fvg_bearish = []
+    
+    for i in range(2, len(df)):
+        c1_high, c1_low = df["high"].iloc[i-2], df["low"].iloc[i-2]
+        c3_high, c3_low = df["high"].iloc[i], df["low"].iloc[i]
+        c2_close = df["close"].iloc[i-1]
+        
+        # گپ صعودی: کف کندل سوم بالاتر از سقف کندل اول باشد
+        if c3_low > c1_high:
+            gap_pct = (c3_low - c1_high) / c2_close
+            if gap_pct >= FVG_THRESHOLD_PCT:
+                fvg_bullish.append({
+                    "top": c3_low,
+                    "bottom": c1_high,
+                    "index": df.index[i-1]
+                })
+                
+        # گپ نزولی: سقف کندل سوم پایین‌تر از کف کندل اول باشد
+        if c3_high < c1_low:
+            gap_pct = (c1_low - c3_high) / c2_close
+            if gap_pct >= FVG_THRESHOLD_PCT:
+                fvg_bearish.append({
+                    "top": c1_low,
+                    "bottom": c3_high,
+                    "index": df.index[i-1]
+                })
+                
+    return fvg_bullish, fvg_bearish
 
-    return out
+def detect_market_structure(df: pd.DataFrame):
+    """تعیین شکست ساختار (BOS) و روند اسمارت مانی"""
+    swing_highs, swing_lows = identify_swings(df)
+    if not swing_highs or not swing_lows:
+        return "UNKNOWN", None, None
+        
+    last_swing_high = swing_highs[-1][1]
+    last_swing_low = swing_lows[-1][1]
+    last_close = df["close"].iloc[-1]
+    
+    if last_close > last_swing_high:
+        return "BULLISH_BOS", last_swing_high, last_swing_low
+    elif last_close < last_swing_low:
+        return "BEARISH_BOS", last_swing_high, last_swing_low
+        
+    return "RANGE", last_swing_high, last_swing_low
 
+def calculate_atr(df: pd.DataFrame, period: int = 14):
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"] - prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
 
-def calculate_rsi(series, period=RSI_PERIOD):
-
-    delta = series.diff()
-
-    gains = delta.clip(lower=0)
-    losses = -delta.clip(upper=0)
-
-    avg_gain = gains.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period
-    ).mean()
-
-    avg_loss = losses.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period
-    ).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-
-    rsi = 100 - (100 / (1 + rs))
-
-    rsi = rsi.where(avg_loss != 0, 100)
-    rsi = rsi.where(avg_gain != 0, 0)
-
-    rsi = rsi.where(
-        ~((avg_gain == 0) & (avg_loss == 0)),
-        50
-    )
-
-    return rsi.fillna(50)
-
-
-def calculate_atr(df, period=ATR_PERIOD):
-
-    previous_close = df["close"].shift(1)
-
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - previous_close).abs(),
-            (df["low"] - previous_close).abs()
-        ],
-        axis=1
-    ).max(axis=1)
-
-    return tr.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period
-    ).mean()
-
-
-def calculate_adx(df, period=ADX_PERIOD):
-
-    up = df["high"].diff()
-    down = -df["low"].diff()
-
-    plus_dm = pd.Series(
-        np.where(
-            (up > down) & (up > 0),
-            up,
-            0.0
-        ),
-        index=df.index
-    )
-
-    minus_dm = pd.Series(
-        np.where(
-            (down > up) & (down > 0),
-            down,
-            0.0
-        ),
-        index=df.index
-    )
-
-    previous_close = df["close"].shift(1)
-
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - previous_close).abs(),
-            (df["low"] - previous_close).abs()
-        ],
-        axis=1
-    ).max(axis=1)
-
-    atr = tr.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period
-    ).mean()
-
-    plus_smoothed = plus_dm.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period
-    ).mean()
-
-    minus_smoothed = minus_dm.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period
-    ).mean()
-
-    plus_di = (
-        100 * plus_smoothed / atr.replace(0, np.nan)
-    )
-
-    minus_di = (
-        100 * minus_smoothed / atr.replace(0, np.nan)
-    )
-
-    dx = (
-        100 * (plus_di - minus_di).abs()
-        / (plus_di + minus_di).replace(0, np.nan)
-    )
-
-    return dx.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period
-    ).mean().fillna(0)
-
-
-def prepare_data(df):
-
-    out = validate_data(df)
-
-    out["ema20"] = out["close"].ewm(
-        span=20, adjust=False
-    ).mean()
-
-    out["ema50"] = out["close"].ewm(
-        span=50, adjust=False
-    ).mean()
-
-    out["ema200"] = out["close"].ewm(
-        span=200, adjust=False
-    ).mean()
-
-    out["rsi"] = calculate_rsi(out["close"])
-
-    out["atr"] = calculate_atr(out)
-
-    out["adx"] = calculate_adx(out)
-
-    return out
-
-
-def get_trend(df):
-
-    data = prepare_data(df)
-
-    if len(data) < MIN_CANDLES:
-        return "INSUFFICIENT_DATA"
-
-    last = data.iloc[-1]
-    previous = data.iloc[-6]
-
-    bullish = (
-        last["close"] > last["ema200"]
-        and last["ema50"] > last["ema200"]
-        and last["ema50"] > previous["ema50"]
-    )
-
-    bearish = (
-        last["close"] < last["ema200"]
-        and last["ema50"] < last["ema200"]
-        and last["ema50"] < previous["ema50"]
-    )
-
-    if bullish:
-        return "BULLISH"
-
-    if bearish:
-        return "BEARISH"
-
-    return "SIDEWAYS"
-
-
-def hold(reason, **extra):
-
-    result = {
-        "signal": "HOLD",
-        "side": "HOLD",
-        "confidence": 0,
-        "reason": reason,
-        "strategy_version": STRATEGY_VERSION
-    }
-
-    result.update(extra)
-
-    return result
-
-
-def analyze_market(
-    df_15m,
-    df_1h,
-    df_4h,
-    symbol=None
-):
-
+def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFrame, symbol: str = None) -> dict:
     try:
-
-        d15 = prepare_data(df_15m)
-        d1 = prepare_data(df_1h)
-        d4 = prepare_data(df_4h)
-
+        d15 = validate_data(df_15m)
+        d1 = validate_data(df_1h)
+        d4 = validate_data(df_4h)
     except Exception as exc:
-
-        return hold(
-            f"DATA_ERROR: {exc}",
-            symbol=symbol
-        )
+        return {"signal": "HOLD", "reason": f"DATA_ERROR: {exc}", "symbol": symbol}
 
     if min(len(d15), len(d1), len(d4)) < MIN_CANDLES:
+        return {"signal": "HOLD", "reason": "INSUFFICIENT_DATA", "symbol": symbol}
 
-        return hold(
-            "INSUFFICIENT_DATA",
-            symbol=symbol
-        )
+    d15["atr"] = calculate_atr(d15)
+    atr = float(d15["atr"].iloc[-1])
+    current_price = float(d15["close"].iloc[-1])
+    current_low = float(d15["low"].iloc[-1])
+    current_high = float(d15["high"].iloc[-1])
 
-    current = d15.iloc[-1]
-    previous = d15.iloc[-2]
+    # 1. جهت کلی تایم‌فریم بزرگتر با ساختار ماژور 1h و 4h
+    structure_1h, s_high_1h, s_low_1h = detect_market_structure(d1)
+    d4_ema50 = d4["close"].ewm(span=50).mean().iloc[-1]
+    d4_bullish = d4["close"].iloc[-1] > d4_ema50
 
-    h1 = d1.iloc[-1]
-    h4 = d4.iloc[-1]
+    bullish_fvgs, bearish_fvgs = detect_fvg(d15)
 
-    price = float(current["close"])
-    atr = float(current["atr"])
-
-    if not np.isfinite(atr) or atr <= 0:
-
-        return hold(
-            "INVALID_ATR",
-            symbol=symbol
-        )
-
-    # --------------------------------------
-    # 1. Higher timeframe trend confirmation
-    # --------------------------------------
-
-    trend_1h = get_trend(df_1h)
-    trend_4h = get_trend(df_4h)
-
-    bullish_trend = (
-        trend_1h == "BULLISH"
-        and trend_4h == "BULLISH"
-    )
-
-    bearish_trend = (
-        trend_1h == "BEARISH"
-        and trend_4h == "BEARISH"
-    )
-
-    if not bullish_trend and not bearish_trend:
-
-        return hold(
-            "HIGHER_TIMEFRAME_TREND_NOT_ALIGNED",
-            symbol=symbol,
-            trend_1h=trend_1h,
-            trend_4h=trend_4h
-        )
-
-    # --------------------------------------
-    # 2. Volatility and trend strength
-    # --------------------------------------
-
-    adx = float(current["adx"])
-
-    if adx < MIN_ADX:
-
-        return hold(
-            "WEAK_TREND_ADX",
-            symbol=symbol,
-            adx=round(adx, 2)
-        )
-
-    # --------------------------------------
-    # 3. Candle quality
-    # --------------------------------------
-
-    candle_range = float(
-        current["high"] - current["low"]
-    )
-
-    if candle_range <= 0:
-
-        return hold("INVALID_CANDLE_RANGE")
-
-    body = abs(
-        float(current["close"] - current["open"])
-    )
-
-    body_ratio = body / candle_range
-
-    if body_ratio < MIN_CANDLE_BODY_RATIO:
-
-        return hold(
-            "WEAK_CONFIRMATION_CANDLE",
-            body_ratio=round(body_ratio, 3)
-        )
-
-    # --------------------------------------
-    # 4. Pullback and EMA reclaim
-    # --------------------------------------
-
-    ema20 = float(current["ema20"])
-    ema50 = float(current["ema50"])
-
-    distance_from_ema = abs(
-        price - ema20
-    ) / atr
-
-    if distance_from_ema > MAX_ENTRY_DISTANCE_ATR:
-
-        return hold(
-            "PRICE_TOO_FAR_FROM_EMA20",
-            distance_atr=round(distance_from_ema, 3)
-        )
-
-    long_pullback = (
-        previous["close"] <= previous["ema20"]
-        and current["low"] <= (
-            ema20 + PULLBACK_TOLERANCE_ATR * atr
-        )
-        and price > ema20
-        and price > current["open"]
-        and current["ema20"] > current["ema50"]
-    )
-
-    short_pullback = (
-        previous["close"] >= previous["ema20"]
-        and current["high"] >= (
-            ema20 - PULLBACK_TOLERANCE_ATR * atr
-        )
-        and price < ema20
-        and price < current["open"]
-        and current["ema20"] < current["ema50"]
-    )
-
-    # --------------------------------------
-    # 5. Momentum confirmation
-    # --------------------------------------
-
-    rsi = float(current["rsi"])
-
-    long_momentum = (
-        MIN_RSI_LONG <= rsi <= MAX_RSI_LONG
-        and price > previous["close"]
-    )
-
-    short_momentum = (
-        MIN_RSI_SHORT <= rsi <= MAX_RSI_SHORT
-        and price < previous["close"]
-    )
-
-    # --------------------------------------
-    # 6. Final signal
-    # --------------------------------------
-
-    common = {
+    common_meta = {
         "symbol": symbol,
-        "strategy_version": STRATEGY_VERSION,
-        "entry": price,
-        "entry_price": price,
+        "entry_price": current_price,
         "atr": atr,
-        "rsi": round(rsi, 2),
-        "adx": round(adx, 2),
-        "body_ratio": round(body_ratio, 3),
-        "trend_1h": trend_1h,
-        "trend_4h": trend_4h,
-        "ema20": ema20,
-        "ema50": ema50,
-        "stop_atr_multiplier": STOP_ATR_MULTIPLIER,
-        "target_atr_multiplier": TARGET_ATR_MULTIPLIER,
-        "risk_reward": 2.0
+        "strategy_version": STRATEGY_VERSION,
+        "risk_reward": RR_RATIO
     }
 
-    if (
-        bullish_trend
-        and long_pullback
-        and long_momentum
-    ):
+    # ================== سناریو لاین اسمارت مانی (LONG) ==================
+    # شرط: روند 4h صعودی + شکست ساختار صعودی در 1h + پولبک کندل 15m به داخل آخرین Bullish FVG
+    if d4_bullish and structure_1h in ["BULLISH_BOS", "RANGE"]:
+        if bullish_fvgs:
+            recent_fvg = bullish_fvgs[-1]
+            # آیا قیمت به محدوده FVG نفوذ کرده و در حال ریجکت است؟
+            if recent_fvg["bottom"] <= current_low <= recent_fvg["top"] and current_price > d15["open"].iloc[-1]:
+                # اردر بلاک معمولاً زیر سطح گپ است
+                stop_loss = min(recent_fvg["bottom"], current_price - (1.2 * atr))
+                risk = current_price - stop_loss
+                take_profit = current_price + (risk * RR_RATIO)
 
-        stop = price - STOP_ATR_MULTIPLIER * atr
-        target = price + TARGET_ATR_MULTIPLIER * atr
+                return {
+                    **common_meta,
+                    "signal": "LONG",
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "trend_1h": "BULLISH_BOS",
+                    "trend_4h": "BULLISH",
+                    "confidence": 85,
+                    "reason": "SMC Entry: 1H Bullish BOS + 15M Bullish FVG Mitigated + Volume Rejection"
+                }
 
-        return {
-            **common,
-            "signal": "LONG",
-            "side": "LONG",
-            "stop": stop,
-            "stop_loss": stop,
-            "target": target,
-            "take_profit": target,
-            "confidence": 75,
-            "reason": (
-                "V2.3 bullish trend + EMA20 reclaim "
-                "+ momentum confirmation"
-            )
-        }
+    # ================== سناریو شورت اسمارت مانی (SHORT) ==================
+    # شرط: روند 4h نزولی + شکست ساختار نزولی در 1h + پولبک کندل 15m به داخل آخرین Bearish FVG
+    if not d4_bullish and structure_1h in ["BEARISH_BOS", "RANGE"]:
+        if bearish_fvgs:
+            recent_fvg = bearish_fvgs[-1]
+            if recent_fvg["bottom"] <= current_high <= recent_fvg["top"] and current_price < d15["open"].iloc[-1]:
+                stop_loss = max(recent_fvg["top"], current_price + (1.2 * atr))
+                risk = stop_loss - current_price
+                take_profit = current_price - (risk * RR_RATIO)
 
-    if (
-        bearish_trend
-        and short_pullback
-        and short_momentum
-    ):
+                return {
+                    **common_meta,
+                    "signal": "SHORT",
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "trend_1h": "BEARISH_BOS",
+                    "trend_4h": "BEARISH",
+                    "confidence": 85,
+                    "reason": "SMC Entry: 1H Bearish BOS + 15M Bearish FVG Mitigated + Supply Pressure"
+                }
 
-        stop = price + STOP_ATR_MULTIPLIER * atr
-        target = price - TARGET_ATR_MULTIPLIER * atr
-
-        return {
-            **common,
-            "signal": "SHORT",
-            "side": "SHORT",
-            "stop": stop,
-            "stop_loss": stop,
-            "target": target,
-            "take_profit": target,
-            "confidence": 75,
-            "reason": (
-                "V2.3 bearish trend + EMA20 rejection "
-                "+ momentum confirmation"
-            )
-        }
-
-    return hold(
-        "NO_VALID_V2.3_ENTRY",
-        **common
-    )
-
-
-def generate_signal(
-    df_15m,
-    df_1h,
-    df_4h,
-    symbol=None
-):
-
-    return analyze_market(
-        df_15m,
-        df_1h,
-        df_4h,
-        symbol
-    )
+    return {
+        "signal": "HOLD",
+        "reason": "NO_SMC_SETUP (Waiting for BOS confirmation & FVG Mitigations)",
+        "symbol": symbol
+    }
