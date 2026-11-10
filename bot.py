@@ -2,6 +2,7 @@ import os
 import time
 import json
 import logging
+from datetime import datetime, timezone
 import requests
 import ccxt
 import pandas as pd
@@ -10,15 +11,19 @@ from strategy import analyze_market
 
 load_dotenv()
 
-# ---------------- CONFIG ----------------
-
+# ---------------- تنظیمات و متغیرها ----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+API_KEY = os.getenv("XT_API_KEY")
+API_SECRET = os.getenv("XT_API_SECRET")
 
-CANDLE_LIMIT = 250
-STATE_FILE = "state.json"
+# فعال‌سازی معامله واقعی (در صورت False بودن، روی کاغذ معامله می‌کند)
+LIVE_TRADING = False  
+LEVERAGE = 10
+RISK_PER_TRADE = 0.015  # ریسک ۱.۵ درصد در هر پوزیشن
+MAX_OPEN_POSITIONS = 3
+STATE_FILE = "live_trader_state.json"
 
-# لیست ۱۰ ارز فیوچرز پرحجم
 SYMBOLS = [
     "BTC/USDT:USDT",
     "ETH/USDT:USDT",
@@ -29,198 +34,218 @@ SYMBOLS = [
     "ADA/USDT:USDT",
     "AVAX/USDT:USDT",
     "LINK/USDT:USDT",
-    "NEAR/USDT:USDT",
+    "LTC/USDT:USDT"
 ]
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# ---------------- EXCHANGE ----------------
-
-exchange = ccxt.xt({
+# ---------------- اتصال به صرافی XT ----------------
+exchange_params = {
     "enableRateLimit": True,
-    "options": {
-        "defaultType": "swap",
-    },
-})
+    "options": {"defaultType": "swap"}
+}
+if LIVE_TRADING and API_KEY and API_SECRET:
+    exchange_params.update({"apiKey": API_KEY, "secret": API_SECRET})
 
-# ---------------- STATE STORAGE ----------------
+exchange = ccxt.xt(exchange_params)
 
-def load_state() -> dict:
+# ---------------- مدیریت وضعیت پوزیشن‌ها ----------------
+def load_state():
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return {}
-    return {}
+            pass
+    return {"positions": {}, "daily_history": [], "last_daily_report": str(datetime.now(timezone.utc).date())}
 
-def save_state(state: dict):
+def save_state(state):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=4)
     except Exception as e:
-        logging.error("Failed to write state: %s", e)
+        logging.error("Failed to save state: %s", e)
 
-# ---------------- TELEGRAM NOTIFICATION ----------------
-
-def send_telegram(message: str) -> bool:
+# ---------------- پیام‌رسان تلگرام ----------------
+def send_telegram(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("Telegram credentials are not set.")
-        return False
-
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
-        resp = requests.post(url, data=payload, timeout=20)
-        data = resp.json()
-        if not data.get("ok"):
-            logging.error("Telegram error: %s", data)
-            return False
-        return True
-    except Exception as exc:
-        logging.exception("Connection error with Telegram: %s", exc)
-        return False
+        requests.post(url, data=payload, timeout=15)
+    except Exception as e:
+        logging.error("Telegram send error: %s", e)
 
-# ---------------- DATA FETCHING ----------------
-
-def fetch_candles(symbol: str, timeframe: str) -> pd.DataFrame:
-    candles = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=CANDLE_LIMIT)
-    if not candles or len(candles) < 100:
-        raise ValueError(f"Insufficient candles for {symbol} on {timeframe}")
-
-    df = pd.DataFrame(
-        candles,
-        columns=["timestamp", "open", "high", "low", "close", "volume"]
-    )
-    # حذف کندل زنده باز برای جلوگیری از خطا در محاسبات پایانی
+# ---------------- دریافت کندل‌ها ----------------
+def fetch_candles(symbol: str, timeframe: str):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
+    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df = df.iloc[:-1].copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df.reset_index(drop=True)
 
-# ---------------- FORMATTING ----------------
-
-def format_price(value) -> str:
-    try:
-        val = float(value)
-        if val >= 100:
-            return f"{val:,.2f}"
-        elif val >= 1:
-            return f"{val:,.4f}"
-        else:
-            return f"{val:,.6f}"
-    except (TypeError, ValueError):
-        return "N/A"
-
-def trend_text(value) -> str:
-    trends = {
-        "BULLISH": "🟢 صعودی",
-        "BEARISH": "🔴 نزولی",
-        "SIDEWAYS": "🟡 خنثی / رِنج",
-    }
-    return trends.get(str(value).upper(), str(value))
-
-# ---------------- REPORT BUILDER ----------------
-
-def create_signal_report(symbol: str, result: dict) -> str:
-    signal = str(result.get("signal", "HOLD")).upper()
-    emoji = "🟢" if signal == "LONG" else "🔴"
-
-    entry = result.get("entry_price")
-    stop = result.get("stop_loss")
-    target = result.get("take_profit")
-    rr = result.get("risk_reward", 2.5)
-
-    trend_1h = trend_text(result.get("trend_1h"))
-    trend_4h = trend_text(result.get("trend_4h"))
-    reason = result.get("reason", "تایید ساختار اسمارت مانی")
-
-    return f"""
-{emoji} <b>سیگنال معتبر اسمارت مانی (SMC)</b>
-
-━━━━━━━━━━━━━━
-🪙 <b>ارز:</b> <code>{symbol}</code>
-🎯 <b>جهت:</b> <b>{signal}</b>
-⚙️ <b>نسخه:</b> <code>{result.get('strategy_version', '3.0')}</code>
-
-━━━━━━━━━━━━━━
-📊 <b>تحلیل ساختار تایم‌فریم‌ها</b>
-• روند 1 ساعته (BOS): {trend_1h}
-• روند 4 ساعته (کلی): {trend_4h}
-
-━━━━━━━━━━━━━━
-📌 <b>مشخصات معامله</b>
-🔹 نقطه ورود: <code>{format_price(entry)}</code>
-🛑 حد ضرر (SL): <code>{format_price(stop)}</code>
-🎯 حد سود (TP): <code>{format_price(target)}</code>
-⚖️ نسبت R:R پیشنهادی: <b>1:{rr}</b>
-
-━━━━━━━━━━━━━━
-💡 <b>دلیل ورود:</b>
-<i>{reason}</i>
-""".strip()
-
-# ---------------- MAIN SCANNER ----------------
-
-def scan_markets():
-    state = load_state()
-
-    for symbol in SYMBOLS:
+# ---------------- مدیریت پوزیشن و سیو سود ----------------
+def manage_open_positions(state):
+    updated_positions = {}
+    
+    for symbol, pos in state.get("positions", {}).items():
         try:
-            logging.info("Checking %s ...", symbol)
-            df_15m = fetch_candles(symbol, "15m")
-            df_1h = fetch_candles(symbol, "1h")
-            df_4h = fetch_candles(symbol, "4h")
+            ticker = exchange.fetch_ticker(symbol)
+            current_price = float(ticker["last"])
+            side = pos["side"]
+            entry = pos["entry"]
+            stop_loss = pos["stop_loss"]
+            take_profit = pos["take_profit"]
+            half_tp = pos["half_tp"]
+            is_breakeven = pos.get("is_breakeven", False)
+            qty = pos["quantity"]
 
-            last_time = str(df_15m["timestamp"].iloc[-1])
-            result = analyze_market(df_15m, df_1h, df_4h, symbol=symbol)
-            signal = result.get("signal")
+            # سناریوی خروج حد ضرر
+            hit_sl = (side == "LONG" and current_price <= stop_loss) or (side == "SHORT" and current_price >= stop_loss)
+            # سناریوی خروج کامل حد سود
+            hit_tp = (side == "LONG" and current_price >= take_profit) or (side == "SHORT" and current_price <= take_profit)
+            # سناریوی سیو سود ۵۰٪ اولیه
+            hit_half = not is_breakeven and ((side == "LONG" and current_price >= half_tp) or (side == "SHORT" and current_price <= half_tp))
 
-            if signal in ["LONG", "SHORT"]:
-                last_saved_time = state.get(symbol, {}).get("last_candle_time")
-                last_saved_signal = state.get(symbol, {}).get("signal")
+            if hit_sl:
+                pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
+                msg = f"🛑 <b>حد ضرر فعال شد!</b>\nارز: {symbol}\nجهت: {side}\nقیمت خروج: {current_price}\nسود/ضرر: {pnl:+.4f} USDT"
+                send_telegram(msg)
+                state["daily_history"].append({"symbol": symbol, "pnl": pnl, "time": str(datetime.now(timezone.utc))})
+                continue
 
-                # اگر در همین کندل قبلاً پیام ارسال شده باشد، تکرار نشود
-                if last_saved_time == last_time and last_saved_signal == signal:
-                    logging.info("%s signal already reported. Skipping duplicate.", symbol)
-                else:
-                    report = create_signal_report(symbol, result)
-                    if send_telegram(report):
-                        state[symbol] = {
-                            "last_candle_time": last_time,
-                            "signal": signal,
-                            "price": result.get("entry_price")
-                        }
-                        save_state(state)
-                        logging.info(">>> SIGNAL SENT FOR %s (%s) <<<", symbol, signal)
-            else:
-                logging.info("%s: HOLD (%s)", symbol, result.get("reason"))
+            if hit_tp:
+                pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
+                msg = f"🎯 <b>تارگت کامل تاچ شد!</b>\nارز: {symbol}\nجهت: {side}\nقیمت خروج: {current_price}\nسود: {pnl:+.4f} USDT"
+                send_telegram(msg)
+                state["daily_history"].append({"symbol": symbol, "pnl": pnl, "time": str(datetime.now(timezone.utc))})
+                continue
 
-            # فاصله زمانی بین هر جفت‌ارز جهت حفظ محدودیت‌های صرافی
-            time.sleep(0.5)
+            if hit_half:
+                realized_pnl = ((half_tp - entry) * (qty / 2)) if side == "LONG" else ((entry - half_tp) * (qty / 2))
+                pos["quantity"] = qty / 2
+                pos["stop_loss"] = entry  # ریسک‌فری کردن معامله
+                pos["is_breakeven"] = True
+                msg = f"💰 <b>سیو سود ۵۰٪ و ریسک‌فری!</b>\nارز: {symbol}\nجهت: {side}\nقیمت: {current_price}\nسود نقدشده: {realized_pnl:+.4f} USDT\nاستاپ به نقطه ورود منتقل شد."
+                send_telegram(msg)
+                state["daily_history"].append({"symbol": symbol, "pnl": realized_pnl, "time": str(datetime.now(timezone.utc))})
 
-        except Exception as err:
-            logging.exception("Failed processing %s: %s", symbol, err)
+            updated_positions[symbol] = pos
 
+        except Exception as e:
+            logging.error("Error managing %s: %s", symbol, e)
+            updated_positions[symbol] = pos
 
-def main():
-    logging.info("Starting SMC Bot for %d symbols...", len(SYMBOLS))
-    try:
-        exchange.load_markets()
-    except Exception as exc:
-        logging.critical("Exchange loading error: %s", exc)
+    state["positions"] = updated_positions
+
+# ---------------- باز کردن معامله جدید ----------------
+def execute_signal(symbol, signal_data, state):
+    side = signal_data["signal"]
+    entry = signal_data["entry_price"]
+    stop = signal_data["stop_loss"]
+    target = signal_data["take_profit"]
+
+    # محاسبه حد سود میانی برای سیو سود
+    half_tp = entry + (target - entry) * 0.5
+
+    # بالانس فرضی یا واقعی
+    balance = 100.0
+    if LIVE_TRADING:
+        try:
+            bal_data = exchange.fetch_balance()
+            balance = float(bal_data["USDT"]["free"])
+        except Exception:
+            pass
+
+    risk_amount = balance * RISK_PER_TRADE
+    price_risk = abs(entry - stop)
+    if price_risk == 0:
         return
 
-    scan_markets()
+    quantity = (risk_amount / price_risk)
 
+    state["positions"][symbol] = {
+        "side": side,
+        "entry": entry,
+        "quantity": quantity,
+        "stop_loss": stop,
+        "take_profit": target,
+        "half_tp": half_tp,
+        "is_breakeven": False,
+        "opened_at": str(datetime.now(timezone.utc))
+    }
+
+    report = (
+        f"⚡ <b>سفارش جدید اجرا شد ({side})</b>\n\n"
+        f"🪙 ارز: <code>{symbol}</code>\n"
+        f"🔹 قیمت ورود: <code>{entry:.4f}</code>\n"
+        f"🛑 حد ضرر: <code>{stop:.4f}</code>\n"
+        f"💰 سیو سود (TP1): <code>{half_tp:.4f}</code>\n"
+        f"🎯 تارگت نهایی: <code>{target:.4f}</code>\n"
+        f"⚖️ حجم پوزیشن: <code>{quantity:.4f}</code>"
+    )
+    send_telegram(report)
+
+# ---------------- گزارش سود و زیان روزانه ----------------
+def send_daily_report_if_needed(state):
+    today = str(datetime.now(timezone.utc).date())
+    if state.get("last_daily_report") != today:
+        history = state.get("daily_history", [])
+        total_pnl = sum(item["pnl"] for item in history)
+        wins = len([item for item in history if item["pnl"] > 0])
+        losses = len([item for item in history if item["pnl"] <= 0])
+        total_trades = wins + losses
+        winrate = (wins / total_trades * 100) if total_trades > 0 else 0
+
+        msg = (
+            f"📅 <b>گزارش عملکرد روزانه ({state.get('last_daily_report')})</b>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💵 کل سود/زیان محقق‌شده: <b>{total_pnl:+.4f} USDT</b>\n"
+            f"📊 تعداد معاملات بسته: {total_trades}\n"
+            f"✅ معاملات برنده: {wins}\n"
+            f"❌ معاملات بازنده: {losses}\n"
+            f"🎯 وین‌ریت روز: <b>{winrate:.1f}%</b>\n"
+            f"━━━━━━━━━━━━━━"
+        )
+        send_telegram(msg)
+        state["daily_history"] = []
+        state["last_daily_report"] = today
+
+# ---------------- اسکنر اصلی ----------------
+def main():
+    state = load_state()
+    exchange.load_markets()
+
+    # ۱. مدیریت معاملات فعال جاری (خروج، سیو سود و ریسک‌فری)
+    manage_open_positions(state)
+
+    # ۲. اسکن جفت‌ارزها برای موقعیت‌های جدید
+    current_open_count = len(state.get("positions", {}))
+
+    for symbol in SYMBOLS:
+        if current_open_count >= MAX_OPEN_POSITIONS:
+            break
+        if symbol in state.get("positions", {}):
+            continue
+
+        try:
+            df15 = fetch_candles(symbol, "15m")
+            df1 = fetch_candles(symbol, "1h")
+            df4 = fetch_candles(symbol, "4h")
+
+            sig = analyze_market(df15, df1, df4, symbol=symbol)
+            if sig.get("signal") in ["LONG", "SHORT"]:
+                execute_signal(symbol, sig, state)
+                current_open_count += 1
+
+            time.sleep(0.4)
+        except Exception as e:
+            logging.error("Scan error on %s: %s", symbol, e)
+
+    # ۳. بررسی زمان ارسال گزارش روزانه
+    send_daily_report_if_needed(state)
+    save_state(state)
 
 if __name__ == "__main__":
     main()
