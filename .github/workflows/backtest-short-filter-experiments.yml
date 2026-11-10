@@ -1,0 +1,44 @@
+name: backtest-short-filter-experiments
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest-short-filter-experiments
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run independent SHORT filter experiments
+        run: python -u backtest_short_filter_experiments.py
+
+      - name: Upload SHORT filter reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-short-filter-results
+          path: |
+            backtest_report_*.json
+            backtest_trades_*.csv
+            backtest_short_filter_comparison.json
+            backtest_short_filter_comparison.csv
+          if-no-files-found: warn
+          retention-days: 30
