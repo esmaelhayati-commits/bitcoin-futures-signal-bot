@@ -24,6 +24,18 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-11 09:22:18.041704+00:00"
+        },
+        "BTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 73830.7,
+            "quantity": 0.006048821272551105,
+            "stop_loss": 74070.42988362757,
+            "take_profit": 73231.37529093106,
+            "tp1": 73531.03764546552,
+            "margin_cost": 22.329435436366943,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-11 13:38:03.295237+00:00"
         }
     },
     "trade_history": [
