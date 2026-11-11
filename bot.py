@@ -18,7 +18,7 @@ API_KEY = os.getenv("XT_API_KEY")
 API_SECRET = os.getenv("XT_API_SECRET")
 
 LIVE_TRADING = False
-LEVERAGE = 10
+LEVERAGE = 20
 RISK_PER_TRADE = 0.015
 MAX_OPEN_POSITIONS = 3
 INITIAL_BALANCE = 100.0
@@ -124,11 +124,11 @@ def manage_positions(state):
                 hit_tp2 = current_price <= take_profit
                 hit_tp1 = not is_tp1_hit and current_price <= tp1
 
-            # 1. Stop Loss exit
+            # 1. خروج در حد ضرر یا ریسک‌فری
             if hit_sl:
                 net_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
                 state["balance"] += net_pnl
-                reason = "BREAKEVEN" if pos.get("is_breakeven") and net_pnl >= 0 else "STOP_LOSS"
+                reason = "BREAKEVEN (Risk-Free)" if pos.get("is_breakeven") and net_pnl >= 0 else "STOP_LOSS"
 
                 lines = [
                     f"🛑 <b>Position Closed: {reason}</b>",
@@ -147,7 +147,7 @@ def manage_positions(state):
                 })
                 continue
 
-            # 2. Final TP2 hit
+            # 2. خروج کامل در تارگت ۲
             if hit_tp2:
                 net_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
                 state["balance"] += net_pnl
@@ -169,7 +169,7 @@ def manage_positions(state):
                 })
                 continue
 
-            # 3. Partial TP1 hit
+            # 3. سیو سود ۵۰٪ در تارگت ۱ و ریسک‌فری
             if hit_tp1:
                 close_qty = qty / 2
                 realized_pnl = (tp1 - entry) * close_qty if side == "LONG" else (entry - tp1) * close_qty
@@ -228,6 +228,11 @@ def open_position(symbol, signal_data, state):
     risk_amount = balance * RISK_PER_TRADE
     quantity = risk_amount / price_risk
 
+    # محاسبه ارزش پوزیشن، مارجین درگیر و موجودی باقیمانده
+    notional_value = quantity * entry
+    margin_cost = notional_value / LEVERAGE
+    remaining_balance = balance - margin_cost
+
     state["positions"][symbol] = {
         "side": side,
         "entry": entry,
@@ -235,6 +240,7 @@ def open_position(symbol, signal_data, state):
         "stop_loss": stop,
         "take_profit": target,
         "tp1": tp1,
+        "margin_cost": margin_cost,
         "is_tp1_hit": False,
         "is_breakeven": False,
         "opened_at": str(datetime.now(timezone.utc))
@@ -244,11 +250,15 @@ def open_position(symbol, signal_data, state):
         f"⚡ <b>New Position Opened ({side})</b>",
         "------------------------------------",
         f"Symbol: <code>{symbol}</code>",
+        f"Leverage: <b>{LEVERAGE}x</b>",
         f"Entry: <code>{entry:.4f}</code>",
-        f"Stop Loss: <code>{stop:.4f}</code>",
+        f"Stop Loss: <code>{stop:.4f}</code> (Risk: ${risk_amount:.2f})",
         f"TP1 (50% Close): <code>{tp1:.4f}</code>",
         f"TP2 (Final): <code>{target:.4f}</code>",
-        f"Quantity: <code>{quantity:.4f}</code>"
+        f"Quantity: <code>{quantity:.4f}</code>",
+        "------------------------------------",
+        f"💵 <b>سرمایه درگیر (مارجین):</b> <code>{margin_cost:.2f} USDT</code>",
+        f"💰 <b>مانده حساب آزاد:</b> <code>{remaining_balance:.2f} USDT</code>"
     ]
     send_telegram("\n".join(lines))
 
