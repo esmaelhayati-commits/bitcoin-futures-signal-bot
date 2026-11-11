@@ -12,6 +12,30 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-11 08:28:54.491042+00:00"
+        },
+        "BTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 73640.0,
+            "quantity": 0.004372580427501284,
+            "stop_loss": 73977.7,
+            "take_profit": 72795.75,
+            "tp1": 73217.875,
+            "margin_cost": 16.09984113405973,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-11 09:22:16.227148+00:00"
+        },
+        "ETH/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 2053.14,
+            "quantity": 0.1193710921881269,
+            "stop_loss": 2065.51,
+            "take_profit": 2022.214999999999,
+            "tp1": 2037.6774999999993,
+            "margin_cost": 12.254278210756542,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-11 09:22:18.041704+00:00"
         }
     },
     "trade_history": [
