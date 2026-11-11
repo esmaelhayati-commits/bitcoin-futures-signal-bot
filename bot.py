@@ -157,34 +157,4 @@ def manage_positions(state):
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"🪙 ارز: <code>{symbol}</code>\n"
                     f"🎯 جهت: <b>{side}</b>\n"
-                    f"🔹 ورود: <code>{entry:.4f}</code> | خروج: <code>{current_price:.4f}</code>\n"
-                    f"💵 سود خالص نهایی: <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)\n"
-                    f"💰 بالانس حساب: <code>{state['balance']:.2f} USDT</code>"
-                )
-                send_telegram(msg)
-
-                state["trade_history"].append({
-                    "symbol": symbol, "side": side, "pnl": net_pnl, "pct": pnl_pct,
-                    "reason": "TAKE_PROFIT_2", "time": now_str
-                })
-                continue
-
-            # 3. برخورد به TP1 (سیو سود ۵۰٪ + ریسک‌فری و تریلینگ استاپ)
-            if hit_tp1:
-                close_qty = qty / 2
-                realized_pnl = (tp1 - entry) * close_qty if side == "LONG" else (entry - tp1) * close_qty
-                state["balance"] += realized_pnl
-
-                pos["quantity"] = close_qty
-                pos["stop_loss"] = entry  # استاپ به نقطه ورود منتقل می‌شود
-                pos["is_breakeven"] = True
-                pos["is_tp1_hit"] = True
-
-                msg = (
-                    f"💰 <b>سیو سود پله اول (TP1) انجام شد!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🪙 ارز: <code>{symbol}</code>\n"
-                    f"🎯 جهت: <b>{side}</b>\n"
-                    f"💵 سود نقد شده (۵۰٪ حجم): <b>{realized_pnl:+.4f} USDT</b>\n"
-                    f"🛡 <b>معامله ریسک‌فری شد:</b> استاپ به نقطه ورود ({entry:.4f}) منتقل گردید.\n"
-                    f"🚀 در حال حرکت به سمت تارگت نهایی (TP2): <code>{take_profit:.4
+                    f"🔹 ورود: <code>{entry:.4f}</code> | خروج
