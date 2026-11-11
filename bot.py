@@ -213,4 +213,135 @@ def open_position(symbol, signal_data, state):
 
     tp1 = entry + (target - entry) * 0.5
     price_risk = abs(entry - stop)
-    if price_risk ==
+    if price_risk == 0:
+        return
+
+    balance = state.get("balance", INITIAL_BALANCE)
+    if LIVE_TRADING:
+        try:
+            bal_data = exchange.fetch_balance()
+            balance = float(bal_data["USDT"]["free"])
+            state["balance"] = balance
+        except Exception:
+            pass
+
+    risk_amount = balance * RISK_PER_TRADE
+    quantity = risk_amount / price_risk
+
+    state["positions"][symbol] = {
+        "side": side,
+        "entry": entry,
+        "quantity": quantity,
+        "stop_loss": stop,
+        "take_profit": target,
+        "tp1": tp1,
+        "is_tp1_hit": False,
+        "is_breakeven": False,
+        "opened_at": str(datetime.now(timezone.utc))
+    }
+
+    lines = [
+        f"⚡ <b>New Position Opened ({side})</b>",
+        "------------------------------------",
+        f"Symbol: <code>{symbol}</code>",
+        f"Entry: <code>{entry:.4f}</code>",
+        f"Stop Loss: <code>{stop:.4f}</code>",
+        f"TP1 (50% Close): <code>{tp1:.4f}</code>",
+        f"TP2 (Final): <code>{target:.4f}</code>",
+        f"Quantity: <code>{quantity:.4f}</code>"
+    ]
+    send_telegram("\n".join(lines))
+
+# ==================== REPORTING (DAILY / WEEKLY / MONTHLY) ====================
+def generate_report_text(title: str, timeframe_label: str, trades: list, current_open_count: int, balance: float) -> str:
+    total_trades = len(trades)
+    wins = [t for t in trades if t["pnl"] > 0]
+    losses = [t for t in trades if t["pnl"] < 0]
+    breakevens = [t for t in trades if t["pnl"] == 0]
+
+    sum_profit = sum(t["pnl"] for t in wins)
+    sum_loss = abs(sum(t["pnl"] for t in losses))
+    net_pnl = sum_profit - sum_loss
+    win_rate = (len(wins) / total_trades * 100) if total_trades > 0 else 0.0
+
+    lines = [
+        f"📊 <b>{title}</b>",
+        "------------------------------------",
+        f"Period: <b>{timeframe_label}</b>",
+        f"Current Balance: <b>{balance:.2f} USDT</b>",
+        f"Net PnL: <b>{net_pnl:+.4f} USDT</b>",
+        f"Total Profit: <code>+{sum_profit:.4f} USDT</code>",
+        f"Total Loss: <code>-{sum_loss:.4f} USDT</code>",
+        "",
+        f"Total Closed Trades: <b>{total_trades}</b>",
+        f"Wins: <code>{len(wins)}</code> | Losses: <code>{len(losses)}</code> | Breakeven: <code>{len(breakevens)}</code>",
+        f"Win Rate: <b>{win_rate:.1f}%</b>",
+        "",
+        f"Active Open Positions: <b>{current_open_count}</b>",
+        "------------------------------------"
+    ]
+    return "\n".join(lines)
+
+def check_and_send_reports(state):
+    now_utc = datetime.now(timezone.utc)
+    today_str = str(now_utc.date())
+    current_week = f"{now_utc.year}-W{now_utc.isocalendar()[1]}"
+    current_month = f"{now_utc.year}-{now_utc.month:02d}"
+
+    trades = state.get("trade_history", [])
+    open_count = len(state.get("positions", {}))
+    balance = state.get("balance", INITIAL_BALANCE)
+
+    # 1. Daily Report
+    if state.get("last_daily_report") != today_str:
+        daily_trades = [t for t in trades if t.get("time", "").startswith(state.get("last_daily_report", ""))]
+        rep = generate_report_text("Daily Performance Report (24H)", state.get("last_daily_report"), daily_trades, open_count, balance)
+        send_telegram(rep)
+        state["last_daily_report"] = today_str
+
+    # 2. Weekly Report
+    if state.get("last_weekly_report") != current_week:
+        rep = generate_report_text("Weekly Performance Report", state.get("last_weekly_report"), trades, open_count, balance)
+        send_telegram(rep)
+        state["last_weekly_report"] = current_week
+
+    # 3. Monthly Report
+    if state.get("last_monthly_report") != current_month:
+        rep = generate_report_text("Monthly Performance Report", state.get("last_monthly_report"), trades, open_count, balance)
+        send_telegram(rep)
+        state["last_monthly_report"] = current_month
+
+# ==================== MAIN SCANNER ====================
+def main():
+    state = load_state()
+    exchange.load_markets()
+
+    manage_positions(state)
+
+    current_open_count = len(state.get("positions", {}))
+
+    for symbol in SYMBOLS:
+        if current_open_count >= MAX_OPEN_POSITIONS:
+            break
+        if symbol in state.get("positions", {}):
+            continue
+
+        try:
+            df15 = fetch_candles(symbol, "15m")
+            df1 = fetch_candles(symbol, "1h")
+            df4 = fetch_candles(symbol, "4h")
+
+            sig = analyze_market(df15, df1, df4, symbol=symbol)
+            if sig.get("signal") in ["LONG", "SHORT"]:
+                open_position(symbol, sig, state)
+                current_open_count += 1
+
+            time.sleep(0.3)
+        except Exception as e:
+            logging.error("Scan error on %s: %s", symbol, e)
+
+    check_and_send_reports(state)
+    save_state(state)
+
+if __name__ == "__main__":
+    main()
