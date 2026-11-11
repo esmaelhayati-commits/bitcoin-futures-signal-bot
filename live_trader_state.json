@@ -1,0 +1,20 @@
+{
+    "balance": 100.0,
+    "positions": {
+        "BTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 73569.1,
+            "quantity": 0.0032397408207343412,
+            "stop_loss": 74032.1,
+            "take_profit": 72411.6,
+            "tp1": 72990.35,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-11 07:18:58.127692+00:00"
+        }
+    },
+    "trade_history": [],
+    "last_daily_report": "2026-11-11",
+    "last_weekly_report": "2026-W46",
+    "last_monthly_report": "2026-11"
+}
