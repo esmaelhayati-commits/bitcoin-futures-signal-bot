@@ -1,18 +1,6 @@
 {
-    "balance": 96.6722146501777,
+    "balance": 95.78796907829839,
     "positions": {
-        "AVAX/USDT:USDT": {
-            "side": "LONG",
-            "entry": 8.654,
-            "quantity": 11.626932365095772,
-            "stop_loss": 8.527,
-            "take_profit": 8.971500000000002,
-            "tp1": 8.812750000000001,
-            "margin_cost": 5.030973634376941,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
-            "opened_at": "2026-11-11 08:28:54.491042+00:00"
-        },
         "ETH/USDT:USDT": {
             "side": "SHORT",
             "entry": 2053.14,
@@ -28,14 +16,26 @@
         "BTC/USDT:USDT": {
             "side": "SHORT",
             "entry": 73830.7,
-            "quantity": 0.006048821272551105,
-            "stop_loss": 74070.42988362757,
+            "quantity": 0.0030244106362755526,
+            "stop_loss": 73830.7,
             "take_profit": 73231.37529093106,
             "tp1": 73531.03764546552,
             "margin_cost": 22.329435436366943,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
+            "opened_at": "2026-11-11 13:38:03.295237+00:00"
+        },
+        "LINK/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 10.303,
+            "quantity": 21.811439558054435,
+            "stop_loss": 10.36887458532254,
+            "take_profit": 10.138313536693651,
+            "tp1": 10.220656768346826,
+            "margin_cost": 11.236163088331743,
             "is_tp1_hit": false,
             "is_breakeven": false,
-            "opened_at": "2026-11-11 13:38:03.295237+00:00"
+            "opened_at": "2026-11-11 14:34:05.870112+00:00"
         }
     },
     "trade_history": [
@@ -54,6 +54,22 @@
             "pct": -0.5494296577946847,
             "reason": "STOP_LOSS",
             "time": "2026-11-11 11:18:50.076087+00:00"
+        },
+        {
+            "symbol": "AVAX/USDT:USDT",
+            "side": "LONG",
+            "pnl": -1.790547584224748,
+            "pct": -1.779523919574762,
+            "reason": "STOP_LOSS",
+            "time": "2026-11-11 14:33:55.913281+00:00"
+        },
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 0.9063020123454488,
+            "pct": 0.45387623305751035,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-11 14:33:55.913281+00:00"
         }
     ],
     "last_daily_report": "2026-11-11",
