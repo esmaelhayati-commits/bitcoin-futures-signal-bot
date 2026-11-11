@@ -124,37 +124,93 @@ def manage_positions(state):
                 hit_tp2 = current_price <= take_profit
                 hit_tp1 = not is_tp1_hit and current_price <= tp1
 
-            # 1. برخورد به حد ضرر (خروج کامل)
+            # 1. Stop Loss exit
             if hit_sl:
                 net_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
                 state["balance"] += net_pnl
-                reason_label = "ریسک‌فری (بدون ضرر)" if pos.get("is_breakeven") and net_pnl >= 0 else "حد ضرر اولیه (SL)"
+                reason = "BREAKEVEN" if pos.get("is_breakeven") and net_pnl >= 0 else "STOP_LOSS"
 
-                msg = (
-                    f"🛑 <b>معامله بسته شد: {reason_label}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🪙 ارز: <code>{symbol}</code>\n"
-                    f"🎯 جهت: <b>{side}</b>\n"
-                    f"🔹 ورود: <code>{entry:.4f}</code> | خروج: <code>{current_price:.4f}</code>\n"
-                    f"📉 سود/زیان: <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)\n"
-                    f"💰 بالانس حساب: <code>{state['balance']:.2f} USDT</code>"
-                )
-                send_telegram(msg)
+                lines = [
+                    f"🛑 <b>Position Closed: {reason}</b>",
+                    "------------------------------------",
+                    f"Symbol: <code>{symbol}</code>",
+                    f"Side: <b>{side}</b>",
+                    f"Entry: <code>{entry:.4f}</code> | Exit: <code>{current_price:.4f}</code>",
+                    f"PnL: <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)",
+                    f"Balance: <code>{state['balance']:.2f} USDT</code>"
+                ]
+                send_telegram("\n".join(lines))
 
                 state["trade_history"].append({
                     "symbol": symbol, "side": side, "pnl": net_pnl, "pct": pnl_pct,
-                    "reason": "STOP_LOSS", "time": now_str
+                    "reason": reason, "time": now_str
                 })
                 continue
 
-            # 2. برخورد به تارگت نهایی TP2 (خروج کامل با سود)
+            # 2. Final TP2 hit
             if hit_tp2:
                 net_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
                 state["balance"] += net_pnl
 
-                msg = (
-                    f"🎉 <b>تارگت نهایی (TP2) تاچ شد! (فروش کامل)</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🪙 ارز: <code>{symbol}</code>\n"
-                    f"🎯 جهت: <b>{side}</b>\n"
-                    f"🔹 ورود: <code>{entry:.4f}</code> | خروج
+                lines = [
+                    "🎉 <b>Target 2 Hit (Full Close)</b>",
+                    "------------------------------------",
+                    f"Symbol: <code>{symbol}</code>",
+                    f"Side: <b>{side}</b>",
+                    f"Entry: <code>{entry:.4f}</code> | Exit: <code>{current_price:.4f}</code>",
+                    f"Net PnL: <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)",
+                    f"Balance: <code>{state['balance']:.2f} USDT</code>"
+                ]
+                send_telegram("\n".join(lines))
+
+                state["trade_history"].append({
+                    "symbol": symbol, "side": side, "pnl": net_pnl, "pct": pnl_pct,
+                    "reason": "TAKE_PROFIT_2", "time": now_str
+                })
+                continue
+
+            # 3. Partial TP1 hit
+            if hit_tp1:
+                close_qty = qty / 2
+                realized_pnl = (tp1 - entry) * close_qty if side == "LONG" else (entry - tp1) * close_qty
+                state["balance"] += realized_pnl
+
+                pos["quantity"] = close_qty
+                pos["stop_loss"] = entry
+                pos["is_breakeven"] = True
+                pos["is_tp1_hit"] = True
+
+                lines = [
+                    "💰 <b>Partial TP1 Hit (50% Closed)</b>",
+                    "------------------------------------",
+                    f"Symbol: <code>{symbol}</code>",
+                    f"Side: <b>{side}</b>",
+                    f"Realized PnL: <b>{realized_pnl:+.4f} USDT</b>",
+                    f"Stop Loss moved to Entry: <code>{entry:.4f}</code> (Risk-Free)",
+                    f"Target 2: <code>{take_profit:.4f}</code>"
+                ]
+                send_telegram("\n".join(lines))
+
+                state["trade_history"].append({
+                    "symbol": symbol, "side": side, "pnl": realized_pnl, "pct": pnl_pct,
+                    "reason": "PARTIAL_TP1", "time": now_str
+                })
+
+            remaining_positions[symbol] = pos
+
+        except Exception as e:
+            logging.error("Error managing %s: %s", symbol, e)
+            remaining_positions[symbol] = pos
+
+    state["positions"] = remaining_positions
+
+# ==================== OPENING POSITIONS ====================
+def open_position(symbol, signal_data, state):
+    side = signal_data["signal"]
+    entry = signal_data["entry_price"]
+    stop = signal_data["stop_loss"]
+    target = signal_data["take_profit"]
+
+    tp1 = entry + (target - entry) * 0.5
+    price_risk = abs(entry - stop)
+    if price_risk ==
