@@ -12,6 +12,30 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-12 12:34:55.467853+00:00"
+        },
+        "SOL/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 81.71,
+            "quantity": 2.140004216603778,
+            "stop_loss": 82.40081717985963,
+            "take_profit": 79.9829570503509,
+            "tp1": 80.84647852517546,
+            "margin_cost": 8.742987226934734,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-12 16:39:17.232353+00:00"
+        },
+        "XRP/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 1.0266,
+            "quantity": 172.29230515938744,
+            "stop_loss": 1.0351804857996085,
+            "take_profit": 1.0051487855009786,
+            "tp1": 1.0158743927504892,
+            "margin_cost": 8.843764023831357,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-12 16:39:19.892560+00:00"
         }
     },
     "trade_history": [
