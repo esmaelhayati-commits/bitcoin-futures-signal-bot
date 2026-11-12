@@ -24,6 +24,18 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-12 16:39:17.232353+00:00"
+        },
+        "BNB/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 653.69,
+            "quantity": 0.5262133617897594,
+            "stop_loss": 656.4537399709612,
+            "take_profit": 646.7806500725972,
+            "tp1": 650.2353250362986,
+            "margin_cost": 17.199020623417393,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-12 22:25:12.328146+00:00"
         }
     },
     "trade_history": [
