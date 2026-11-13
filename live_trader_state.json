@@ -1,43 +1,6 @@
 {
-    "balance": 96.40503246776265,
-    "positions": {
-        "ETH/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 2019.59,
-            "quantity": 0.07617416453677846,
-            "stop_loss": 2038.0,
-            "take_profit": 1973.5649999999996,
-            "tp1": 1996.5774999999999,
-            "margin_cost": 7.69202904784162,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
-            "opened_at": "2026-11-12 12:34:55.467853+00:00"
-        },
-        "SOL/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 81.71,
-            "quantity": 1.070002108301889,
-            "stop_loss": 81.71,
-            "take_profit": 79.9829570503509,
-            "tp1": 80.84647852517546,
-            "margin_cost": 8.742987226934734,
-            "is_tp1_hit": true,
-            "is_breakeven": true,
-            "opened_at": "2026-11-12 16:39:17.232353+00:00"
-        },
-        "BTC/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 70481.7,
-            "quantity": 0.003935688039016514,
-            "stop_loss": 70849.12634900956,
-            "take_profit": 69563.13412747609,
-            "tp1": 70022.41706373804,
-            "margin_cost": 13.86969918297751,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
-            "opened_at": "2026-11-13 02:32:21.072621+00:00"
-        }
-    },
+    "balance": 108.01404399117393,
+    "positions": {},
     "trade_history": [
         {
             "symbol": "BTC/USDT:USDT",
@@ -182,6 +145,30 @@
             "pct": 1.370701260555612,
             "reason": "PARTIAL_TP1",
             "time": "2026-11-13 02:32:18.957254+00:00"
+        },
+        {
+            "symbol": "ETH/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 4.444000759075649,
+            "pct": 2.888705133220105,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-13 03:30:08.462347+00:00"
+        },
+        {
+            "symbol": "SOL/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 2.6429052075056645,
+            "pct": 3.022885815689633,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-13 03:30:08.462347+00:00"
+        },
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 4.522105556829974,
+            "pct": 1.6302103950387121,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-13 03:30:08.462347+00:00"
         }
     ],
     "last_daily_report": "2026-11-13",
