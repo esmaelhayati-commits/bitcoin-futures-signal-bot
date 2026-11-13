@@ -1,5 +1,5 @@
 {
-    "balance": 101.62613710794037,
+    "balance": 100.10174505132126,
     "positions": {
         "XRP/USDT:USDT": {
             "side": "SHORT",
@@ -24,18 +24,6 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-13 23:27:48.828969+00:00"
-        },
-        "LTC/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 48.91,
-            "quantity": 3.3875379035979907,
-            "stop_loss": 49.36,
-            "take_profit": 47.78499999999999,
-            "tp1": 48.3475,
-            "margin_cost": 8.284223943248886,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
-            "opened_at": "2026-11-13 23:27:57.317564+00:00"
         }
     },
     "trade_history": [
@@ -294,6 +282,14 @@
             "pct": 1.6404159615857408,
             "reason": "TAKE_PROFIT_2",
             "time": "2026-11-13 23:27:44.006471+00:00"
+        },
+        {
+            "symbol": "LTC/USDT:USDT",
+            "side": "SHORT",
+            "pnl": -1.5243920566191054,
+            "pct": -0.9200572480065484,
+            "reason": "STOP_LOSS",
+            "time": "2026-11-13 23:59:32.417139+00:00"
         }
     ],
     "last_daily_report": "2026-11-13",
