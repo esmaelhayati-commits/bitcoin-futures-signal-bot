@@ -1,6 +1,19 @@
 {
     "balance": 103.39196203484528,
-    "positions": {},
+    "positions": {
+        "ETH/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 1941.3,
+            "quantity": 0.08966880407544217,
+            "stop_loss": 1958.5956408476002,
+            "take_profit": 1898.0608978809994,
+            "tp1": 1919.6804489404997,
+            "margin_cost": 8.703702467582794,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-13 07:44:12.777760+00:00"
+        }
+    },
     "trade_history": [
         {
             "symbol": "BTC/USDT:USDT",
