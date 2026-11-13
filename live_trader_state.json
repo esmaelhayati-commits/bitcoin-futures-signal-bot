@@ -1,6 +1,31 @@
 {
     "balance": 108.01404399117393,
-    "positions": {},
+    "positions": {
+        "AVAX/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 8.044,
+            "quantity": 19.261882077462463,
+            "stop_loss": 8.12811486755821,
+            "take_profit": 7.833712831104476,
+            "tp1": 7.938856415552238,
+            "margin_cost": 7.747128971555403,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-13 04:27:03.886078+00:00"
+        },
+        "LTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 47.94,
+            "quantity": 3.4472567231225804,
+            "stop_loss": 48.41,
+            "take_profit": 46.765,
+            "tp1": 47.3525,
+            "margin_cost": 8.263074365324824,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-13 04:27:07.201897+00:00"
+        }
+    },
     "trade_history": [
         {
             "symbol": "BTC/USDT:USDT",
