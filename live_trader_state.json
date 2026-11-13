@@ -1,18 +1,6 @@
 {
-    "balance": 99.47582448393918,
+    "balance": 101.62613710794037,
     "positions": {
-        "BTC/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 69141.0,
-            "quantity": 0.0018958848739209953,
-            "stop_loss": 69141.0,
-            "take_profit": 68183.24999999999,
-            "tp1": 68662.125,
-            "margin_cost": 13.108337606777152,
-            "is_tp1_hit": true,
-            "is_breakeven": true,
-            "opened_at": "2026-11-13 14:39:23.508774+00:00"
-        },
         "XRP/USDT:USDT": {
             "side": "SHORT",
             "entry": 1.022,
@@ -24,6 +12,30 @@
             "is_tp1_hit": true,
             "is_breakeven": true,
             "opened_at": "2026-11-13 18:32:25.330506+00:00"
+        },
+        "SOL/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 77.38,
+            "quantity": 1.836616935685673,
+            "stop_loss": 78.21,
+            "take_profit": 75.305,
+            "tp1": 76.3425,
+            "margin_cost": 7.105870924167869,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-13 23:27:48.828969+00:00"
+        },
+        "LTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 48.91,
+            "quantity": 3.3875379035979907,
+            "stop_loss": 49.36,
+            "take_profit": 47.78499999999999,
+            "tp1": 48.3475,
+            "margin_cost": 8.284223943248886,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-13 23:27:57.317564+00:00"
         }
     },
     "trade_history": [
@@ -274,6 +286,14 @@
             "pct": 1.2133072407044978,
             "reason": "PARTIAL_TP1",
             "time": "2026-11-13 22:07:09.699765+00:00"
+        },
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 2.150312624001187,
+            "pct": 1.6404159615857408,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-13 23:27:44.006471+00:00"
         }
     ],
     "last_daily_report": "2026-11-13",
