@@ -1,5 +1,5 @@
 {
-    "balance": 95.48106266913643,
+    "balance": 96.40503246776265,
     "positions": {
         "ETH/USDT:USDT": {
             "side": "SHORT",
@@ -16,14 +16,26 @@
         "SOL/USDT:USDT": {
             "side": "SHORT",
             "entry": 81.71,
-            "quantity": 2.140004216603778,
-            "stop_loss": 82.40081717985963,
+            "quantity": 1.070002108301889,
+            "stop_loss": 81.71,
             "take_profit": 79.9829570503509,
             "tp1": 80.84647852517546,
             "margin_cost": 8.742987226934734,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
+            "opened_at": "2026-11-12 16:39:17.232353+00:00"
+        },
+        "BTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 70481.7,
+            "quantity": 0.003935688039016514,
+            "stop_loss": 70849.12634900956,
+            "take_profit": 69563.13412747609,
+            "tp1": 70022.41706373804,
+            "margin_cost": 13.86969918297751,
             "is_tp1_hit": false,
             "is_breakeven": false,
-            "opened_at": "2026-11-12 16:39:17.232353+00:00"
+            "opened_at": "2026-11-13 02:32:21.072621+00:00"
         }
     },
     "trade_history": [
@@ -162,6 +174,14 @@
             "pct": -0.42833759121295334,
             "reason": "STOP_LOSS",
             "time": "2026-11-12 23:47:43.028850+00:00"
+        },
+        {
+            "symbol": "SOL/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 0.9239697986262115,
+            "pct": 1.370701260555612,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-13 02:32:18.957254+00:00"
         }
     ],
     "last_daily_report": "2026-11-13",
