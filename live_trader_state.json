@@ -12,6 +12,18 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-13 07:44:12.777760+00:00"
+        },
+        "LTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 48.73,
+            "quantity": 3.673954993081043,
+            "stop_loss": 49.15212804278859,
+            "take_profit": 47.67467989302851,
+            "tp1": 48.20233994651426,
+            "margin_cost": 8.95159134064196,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-13 08:39:24.567035+00:00"
         }
     },
     "trade_history": [
