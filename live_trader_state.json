@@ -1,5 +1,5 @@
 {
-    "balance": 128.22776274232797,
+    "balance": 128.14221870566809,
     "positions": {
         "AVAX/USDT:USDT": {
             "side": "SHORT",
@@ -13,6 +13,19 @@
             "is_tp1_hit": true,
             "is_breakeven": true,
             "opened_at": "2026-11-14 15:43:41.450207+00:00"
+        },
+        "BNB/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 590.69,
+            "quantity": 0.2896410525314286,
+            "stop_loss": 596.74,
+            "take_profit": 575.5650000000002,
+            "tp1": 583.1275,
+            "margin_cost": 8.55440366598948,
+            "entry_fee": 0.08554403665989478,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-14 18:14:04.226627+00:00"
         }
     },
     "trade_history": [
