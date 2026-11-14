@@ -1,41 +1,29 @@
 {
-    "balance": 100.10174505132126,
+    "balance": 112.75836112653884,
     "positions": {
-        "XRP/USDT:USDT": {
+        "AVAX/USDT:USDT": {
             "side": "SHORT",
-            "entry": 1.022,
-            "quantity": 82.82687304897664,
-            "stop_loss": 1.022,
-            "take_profit": 0.9996902342825869,
-            "tp1": 1.0108451171412933,
-            "margin_cost": 8.464906425605411,
-            "is_tp1_hit": true,
-            "is_breakeven": true,
-            "opened_at": "2026-11-13 18:32:25.330506+00:00"
-        },
-        "SOL/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 77.38,
-            "quantity": 1.836616935685673,
-            "stop_loss": 78.21,
-            "take_profit": 75.305,
-            "tp1": 76.3425,
-            "margin_cost": 7.105870924167869,
+            "entry": 8.133,
+            "quantity": 30.35330965178646,
+            "stop_loss": 8.188722932237095,
+            "take_profit": 7.99369266940726,
+            "tp1": 8.06334633470363,
+            "margin_cost": 12.343173369898963,
             "is_tp1_hit": false,
             "is_breakeven": false,
-            "opened_at": "2026-11-13 23:27:48.828969+00:00"
+            "opened_at": "2026-11-14 02:29:48.815741+00:00"
         },
-        "LINK/USDT:USDT": {
+        "LTC/USDT:USDT": {
             "side": "SHORT",
-            "entry": 9.797,
-            "quantity": 22.3106757537572,
-            "stop_loss": 9.864300793232001,
-            "take_profit": 9.62874801692,
-            "tp1": 9.71287400846,
-            "margin_cost": 10.928884517977965,
+            "entry": 49.07,
+            "quantity": 5.832329023786508,
+            "stop_loss": 49.36,
+            "take_profit": 48.345,
+            "tp1": 48.707499999999996,
+            "margin_cost": 14.309619259860199,
             "is_tp1_hit": false,
             "is_breakeven": false,
-            "opened_at": "2026-11-14 01:44:39.898726+00:00"
+            "opened_at": "2026-11-14 02:29:51.737583+00:00"
         }
     },
     "trade_history": [
@@ -302,6 +290,30 @@
             "pct": -0.9200572480065484,
             "reason": "STOP_LOSS",
             "time": "2026-11-13 23:59:32.417139+00:00"
+        },
+        {
+            "symbol": "XRP/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 3.039746240897448,
+            "pct": 3.590998043052844,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-14 02:29:36.185672+00:00"
+        },
+        {
+            "symbol": "SOL/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 4.1507542746496044,
+            "pct": 2.9206513310932944,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-14 02:29:36.185672+00:00"
+        },
+        {
+            "symbol": "LINK/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 5.466115559670536,
+            "pct": 2.500765540471583,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-14 02:29:36.185672+00:00"
         }
     ],
     "last_daily_report": "2026-11-14",
