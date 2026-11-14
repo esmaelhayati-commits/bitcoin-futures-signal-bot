@@ -1,5 +1,5 @@
 {
-    "balance": 130.34903763393748,
+    "balance": 130.27090449571102,
     "positions": {
         "BNB/USDT:USDT": {
             "side": "SHORT",
@@ -13,6 +13,19 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-14 18:14:04.226627+00:00"
+        },
+        "ADA/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 0.1529,
+            "quantity": 1022.0161965526567,
+            "stop_loss": 0.15466021602605148,
+            "take_profit": 0.14849945993487132,
+            "tp1": 0.15069972996743566,
+            "margin_cost": 7.813313822645061,
+            "entry_fee": 0.07813313822645061,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-14 20:43:24.551626+00:00"
         }
     },
     "trade_history": [
