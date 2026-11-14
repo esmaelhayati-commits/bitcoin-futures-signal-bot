@@ -1,40 +1,40 @@
 {
-    "balance": 112.75836112653884,
+    "balance": 115.92969003322278,
     "positions": {
         "AVAX/USDT:USDT": {
             "side": "SHORT",
             "entry": 8.133,
-            "quantity": 30.35330965178646,
-            "stop_loss": 8.188722932237095,
+            "quantity": 15.17665482589323,
+            "stop_loss": 8.133,
             "take_profit": 7.99369266940726,
             "tp1": 8.06334633470363,
             "margin_cost": 12.343173369898963,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
             "opened_at": "2026-11-14 02:29:48.815741+00:00"
         },
         "LTC/USDT:USDT": {
             "side": "SHORT",
             "entry": 49.07,
-            "quantity": 5.832329023786508,
-            "stop_loss": 49.36,
+            "quantity": 2.916164511893254,
+            "stop_loss": 49.07,
             "take_profit": 48.345,
             "tp1": 48.707499999999996,
             "margin_cost": 14.309619259860199,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
             "opened_at": "2026-11-14 02:29:51.737583+00:00"
         },
         "BTC/USDT:USDT": {
             "side": "SHORT",
             "entry": 67500.1,
-            "quantity": 0.0027284649409551514,
-            "stop_loss": 68120.0,
+            "quantity": 0.0013642324704775757,
+            "stop_loss": 67500.1,
             "take_profit": 65950.35000000002,
             "tp1": 66725.225,
             "margin_cost": 9.208582818048342,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
             "opened_at": "2026-11-14 03:16:23.728522+00:00"
         }
     },
@@ -326,6 +326,30 @@
             "pct": 2.500765540471583,
             "reason": "TAKE_PROFIT_2",
             "time": "2026-11-14 02:29:36.185672+00:00"
+        },
+        {
+            "symbol": "AVAX/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 1.0571096355613017,
+            "pct": 0.9590556990040503,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-14 04:16:58.333211+00:00"
+        },
+        {
+            "symbol": "LTC/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 1.057109635561317,
+            "pct": 1.3857754228652939,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-14 04:16:58.333211+00:00"
+        },
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 1.0571096355613114,
+            "pct": 1.2151093109491862,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-14 04:16:58.333211+00:00"
         }
     ],
     "last_daily_report": "2026-11-14",
