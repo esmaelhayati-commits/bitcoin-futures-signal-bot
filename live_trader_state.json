@@ -1,5 +1,5 @@
 {
-    "balance": 120.86266604837118,
+    "balance": 121.84050734738946,
     "positions": {
         "BTC/USDT:USDT": {
             "side": "SHORT",
@@ -16,14 +16,14 @@
         "BNB/USDT:USDT": {
             "side": "SHORT",
             "entry": 608.48,
-            "quantity": 0.2941214437505323,
-            "stop_loss": 614.04,
+            "quantity": 0.14706072187526614,
+            "stop_loss": 607.87152,
             "take_profit": 594.5800000000002,
             "tp1": 601.5300000000001,
             "margin_cost": 8.948350804666195,
             "entry_fee": 0.08948350804666194,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
             "opened_at": "2026-11-14 13:32:17.795615+00:00"
         }
     },
@@ -355,6 +355,15 @@
             "pct": 1.9427025697774436,
             "reason": "TAKE_PROFIT_2",
             "time": "2026-11-14 10:50:41.924208+00:00"
+        },
+        {
+            "symbol": "BNB/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 0.9778412990182752,
+            "pct": 1.2095713910071018,
+            "fee": 0.04423071801481443,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-14 15:01:58.234271+00:00"
         }
     ],
     "last_daily_report": "2026-11-14",
