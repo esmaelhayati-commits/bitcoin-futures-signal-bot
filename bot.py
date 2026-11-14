@@ -19,8 +19,11 @@ API_SECRET = os.getenv("XT_API_SECRET")
 
 LIVE_TRADING = False
 LEVERAGE = 20
-RISK_PER_TRADE = 0.015
-MAX_OPEN_POSITIONS = 3
+RISK_PER_TRADE = 0.015          # 1.5% risk per trade
+MAX_OPEN_POSITIONS = 2          # Reduced from 3 to 2 for correlation protection
+MAX_SAME_SIDE_POSITIONS = 2     # Max 2 positions in the same direction
+MIN_SL_PCT = 0.004              # Minimum 0.4% SL distance to prevent oversized lots
+FEE_RATE = 0.0005               # 0.05% taker fee per side (XT Futures standard)
 INITIAL_BALANCE = 100.0
 STATE_FILE = "live_trader_state.json"
 
@@ -124,11 +127,14 @@ def manage_positions(state):
                 hit_tp2 = current_price <= take_profit
                 hit_tp1 = not is_tp1_hit and current_price <= tp1
 
-            # 1. خروج در حد ضرر یا ریسک‌فری
+            # 1. Stop Loss or Breakeven Exit
             if hit_sl:
-                net_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
+                gross_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
+                exit_fee = (current_price * qty) * FEE_RATE
+                net_pnl = gross_pnl - exit_fee
                 state["balance"] += net_pnl
-                reason = "BREAKEVEN (Risk-Free)" if pos.get("is_breakeven") and net_pnl >= 0 else "STOP_LOSS"
+
+                reason = "BREAKEVEN (Risk-Free)" if pos.get("is_breakeven") and gross_pnl >= 0 else "STOP_LOSS"
 
                 lines = [
                     f"🛑 <b>Position Closed: {reason}</b>",
@@ -136,20 +142,23 @@ def manage_positions(state):
                     f"Symbol: <code>{symbol}</code>",
                     f"Side: <b>{side}</b>",
                     f"Entry: <code>{entry:.4f}</code> | Exit: <code>{current_price:.4f}</code>",
-                    f"PnL: <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)",
+                    f"Net PnL (after fee): <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)",
+                    f"Fee Paid: <code>-{exit_fee:.4f} USDT</code>",
                     f"Balance: <code>{state['balance']:.2f} USDT</code>"
                 ]
                 send_telegram("\n".join(lines))
 
                 state["trade_history"].append({
                     "symbol": symbol, "side": side, "pnl": net_pnl, "pct": pnl_pct,
-                    "reason": reason, "time": now_str
+                    "fee": exit_fee, "reason": reason, "time": now_str
                 })
                 continue
 
-            # 2. خروج کامل در تارگت ۲
+            # 2. Final TP2 Hit (Full Close)
             if hit_tp2:
-                net_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
+                gross_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
+                exit_fee = (current_price * qty) * FEE_RATE
+                net_pnl = gross_pnl - exit_fee
                 state["balance"] += net_pnl
 
                 lines = [
@@ -158,25 +167,32 @@ def manage_positions(state):
                     f"Symbol: <code>{symbol}</code>",
                     f"Side: <b>{side}</b>",
                     f"Entry: <code>{entry:.4f}</code> | Exit: <code>{current_price:.4f}</code>",
-                    f"Net PnL: <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)",
+                    f"Net PnL (after fee): <b>{net_pnl:+.4f} USDT</b> ({pnl_pct:+.2f}%)",
+                    f"Fee Paid: <code>-{exit_fee:.4f} USDT</code>",
                     f"Balance: <code>{state['balance']:.2f} USDT</code>"
                 ]
                 send_telegram("\n".join(lines))
 
                 state["trade_history"].append({
                     "symbol": symbol, "side": side, "pnl": net_pnl, "pct": pnl_pct,
-                    "reason": "TAKE_PROFIT_2", "time": now_str
+                    "fee": exit_fee, "reason": "TAKE_PROFIT_2", "time": now_str
                 })
                 continue
 
-            # 3. سیو سود ۵۰٪ در تارگت ۱ و ریسک‌فری
+            # 3. Partial TP1 Hit (50% Close + Breakeven)
             if hit_tp1:
                 close_qty = qty / 2
-                realized_pnl = (tp1 - entry) * close_qty if side == "LONG" else (entry - tp1) * close_qty
+                gross_pnl = (tp1 - entry) * close_qty if side == "LONG" else (entry - tp1) * close_qty
+                exit_fee = (tp1 * close_qty) * FEE_RATE
+                realized_pnl = gross_pnl - exit_fee
                 state["balance"] += realized_pnl
 
+                # Move SL slightly past entry to cover exit fee for true risk-free
+                fee_buffer = entry * (FEE_RATE * 2)
+                breakeven_sl = entry + fee_buffer if side == "LONG" else entry - fee_buffer
+
                 pos["quantity"] = close_qty
-                pos["stop_loss"] = entry
+                pos["stop_loss"] = breakeven_sl
                 pos["is_breakeven"] = True
                 pos["is_tp1_hit"] = True
 
@@ -185,15 +201,15 @@ def manage_positions(state):
                     "------------------------------------",
                     f"Symbol: <code>{symbol}</code>",
                     f"Side: <b>{side}</b>",
-                    f"Realized PnL: <b>{realized_pnl:+.4f} USDT</b>",
-                    f"Stop Loss moved to Entry: <code>{entry:.4f}</code> (Risk-Free)",
+                    f"Realized Net PnL: <b>{realized_pnl:+.4f} USDT</b>",
+                    f"Stop Loss moved to Breakeven (+fee buffer): <code>{breakeven_sl:.4f}</code>",
                     f"Target 2: <code>{take_profit:.4f}</code>"
                 ]
                 send_telegram("\n".join(lines))
 
                 state["trade_history"].append({
                     "symbol": symbol, "side": side, "pnl": realized_pnl, "pct": pnl_pct,
-                    "reason": "PARTIAL_TP1", "time": now_str
+                    "fee": exit_fee, "reason": "PARTIAL_TP1", "time": now_str
                 })
 
             remaining_positions[symbol] = pos
@@ -207,14 +223,29 @@ def manage_positions(state):
 # ==================== OPENING POSITIONS ====================
 def open_position(symbol, signal_data, state):
     side = signal_data["signal"]
-    entry = signal_data["entry_price"]
-    stop = signal_data["stop_loss"]
-    target = signal_data["take_profit"]
+    entry = float(signal_data["entry_price"])
+    stop = float(signal_data["stop_loss"])
+    target = float(signal_data["take_profit"])
+
+    # Check correlation / same-side limit
+    same_side_count = sum(1 for p in state.get("positions", {}).values() if p.get("side") == side)
+    if same_side_count >= MAX_SAME_SIDE_POSITIONS:
+        logging.info("Skipping %s (%s): max same-side positions reached.", symbol, side)
+        return False
+
+    # Enforce minimum Stop Loss distance (0.4%) to prevent oversized leverage exposure
+    min_sl_dist = entry * MIN_SL_PCT
+    raw_risk = abs(entry - stop)
+    if raw_risk == 0:
+        return False
+
+    if raw_risk < min_sl_dist:
+        stop = entry - min_sl_dist if side == "LONG" else entry + min_sl_dist
+        price_risk = min_sl_dist
+    else:
+        price_risk = raw_risk
 
     tp1 = entry + (target - entry) * 0.5
-    price_risk = abs(entry - stop)
-    if price_risk == 0:
-        return
 
     balance = state.get("balance", INITIAL_BALANCE)
     if LIVE_TRADING:
@@ -225,13 +256,25 @@ def open_position(symbol, signal_data, state):
         except Exception:
             pass
 
+    # Cap total risk at 1.5% of balance (accounting for estimated round-trip fees)
     risk_amount = balance * RISK_PER_TRADE
-    quantity = risk_amount / price_risk
+    effective_risk_per_unit = price_risk + (entry * FEE_RATE * 2)
+    quantity = risk_amount / effective_risk_per_unit
 
-    # محاسبه ارزش پوزیشن، مارجین درگیر و موجودی باقیمانده
     notional_value = quantity * entry
     margin_cost = notional_value / LEVERAGE
-    remaining_balance = balance - margin_cost
+    entry_fee = notional_value * FEE_RATE
+
+    # Ensure sufficient free margin
+    used_margin = sum(p.get("margin_cost", 0.0) for p in state.get("positions", {}).values())
+    free_balance = balance - used_margin
+    if margin_cost + entry_fee > free_balance * 0.9:
+        logging.info("Skipping %s: insufficient free margin.", symbol)
+        return False
+
+    # Deduct entry fee immediately from balance for realistic tracking
+    state["balance"] -= entry_fee
+    remaining_free = state["balance"] - (used_margin + margin_cost)
 
     state["positions"][symbol] = {
         "side": side,
@@ -241,6 +284,7 @@ def open_position(symbol, signal_data, state):
         "take_profit": target,
         "tp1": tp1,
         "margin_cost": margin_cost,
+        "entry_fee": entry_fee,
         "is_tp1_hit": False,
         "is_breakeven": False,
         "opened_at": str(datetime.now(timezone.utc))
@@ -252,15 +296,17 @@ def open_position(symbol, signal_data, state):
         f"Symbol: <code>{symbol}</code>",
         f"Leverage: <b>{LEVERAGE}x</b>",
         f"Entry: <code>{entry:.4f}</code>",
-        f"Stop Loss: <code>{stop:.4f}</code> (Risk: ${risk_amount:.2f})",
+        f"Stop Loss: <code>{stop:.4f}</code> (Max Risk: ${risk_amount:.2f})",
         f"TP1 (50% Close): <code>{tp1:.4f}</code>",
         f"TP2 (Final): <code>{target:.4f}</code>",
         f"Quantity: <code>{quantity:.4f}</code>",
         "------------------------------------",
         f"💵 <b>سرمایه درگیر (مارجین):</b> <code>{margin_cost:.2f} USDT</code>",
-        f"💰 <b>مانده حساب آزاد:</b> <code>{remaining_balance:.2f} USDT</code>"
+        f"🧾 <b>کارمزد ورود:</b> <code>-{entry_fee:.4f} USDT</code>",
+        f"💰 <b>مانده حساب آزاد:</b> <code>{remaining_free:.2f} USDT</code>"
     ]
     send_telegram("\n".join(lines))
+    return True
 
 # ==================== REPORTING (DAILY / WEEKLY / MONTHLY) ====================
 def generate_report_text(title: str, timeframe_label: str, trades: list, current_open_count: int, balance: float) -> str:
@@ -343,8 +389,8 @@ def main():
 
             sig = analyze_market(df15, df1, df4, symbol=symbol)
             if sig.get("signal") in ["LONG", "SHORT"]:
-                open_position(symbol, sig, state)
-                current_open_count += 1
+                if open_position(symbol, sig, state):
+                    current_open_count += 1
 
             time.sleep(0.3)
         except Exception as e:
