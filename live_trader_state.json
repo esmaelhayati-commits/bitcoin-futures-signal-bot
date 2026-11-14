@@ -1,31 +1,31 @@
 {
-    "balance": 130.27090449571102,
+    "balance": 138.0378586542333,
     "positions": {
         "BNB/USDT:USDT": {
             "side": "SHORT",
             "entry": 590.69,
-            "quantity": 0.2896410525314286,
-            "stop_loss": 596.74,
+            "quantity": 0.1448205262657143,
+            "stop_loss": 590.0993100000001,
             "take_profit": 575.5650000000002,
             "tp1": 583.1275,
             "margin_cost": 8.55440366598948,
             "entry_fee": 0.08554403665989478,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
             "opened_at": "2026-11-14 18:14:04.226627+00:00"
         },
-        "ADA/USDT:USDT": {
+        "BTC/USDT:USDT": {
             "side": "SHORT",
-            "entry": 0.1529,
-            "quantity": 1022.0161965526567,
-            "stop_loss": 0.15466021602605148,
-            "take_profit": 0.14849945993487132,
-            "tp1": 0.15069972996743566,
-            "margin_cost": 7.813313822645061,
-            "entry_fee": 0.07813313822645061,
+            "entry": 64233.3,
+            "quantity": 0.001831629032978545,
+            "stop_loss": 65300.0,
+            "take_profit": 61566.55000000001,
+            "tp1": 62899.925,
+            "margin_cost": 5.882578858201039,
+            "entry_fee": 0.05882578858201039,
             "is_tp1_hit": false,
             "is_breakeven": false,
-            "opened_at": "2026-11-14 20:43:24.551626+00:00"
+            "opened_at": "2026-11-14 21:17:21.686934+00:00"
         }
     },
     "trade_history": [
@@ -401,6 +401,24 @@
             "fee": 0.03961604037114444,
             "reason": "TAKE_PROFIT_2",
             "time": "2026-11-14 18:52:25.886189+00:00"
+        },
+        {
+            "symbol": "BNB/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 1.0529808141694592,
+            "pct": 2.4530633665712993,
+            "fee": 0.04222441571500516,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-14 21:17:19.295586+00:00"
+        },
+        {
+            "symbol": "ADA/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 6.7727991329348125,
+            "pct": 4.38194898626554,
+            "fee": 0.0747093839679992,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-14 21:17:19.295586+00:00"
         }
     ],
     "last_daily_report": "2026-11-14",
