@@ -1,19 +1,6 @@
 {
-    "balance": 138.76222084773428,
+    "balance": 138.20092062167222,
     "positions": {
-        "BNB/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 593.13,
-            "quantity": 0.1859887923199037,
-            "stop_loss": 592.53687,
-            "take_profit": 580.7160781119576,
-            "tp1": 586.9230390559787,
-            "margin_cost": 11.031553238870448,
-            "entry_fee": 0.11031553238870448,
-            "is_tp1_hit": true,
-            "is_breakeven": true,
-            "opened_at": "2026-11-15 06:14:42.264017+00:00"
-        },
         "XRP/USDT:USDT": {
             "side": "SHORT",
             "entry": 0.9582,
@@ -464,6 +451,15 @@
             "fee": 0.054580553609374576,
             "reason": "PARTIAL_TP1",
             "time": "2026-11-15 08:15:20.549742+00:00"
+        },
+        {
+            "symbol": "BNB/USDT:USDT",
+            "side": "SHORT",
+            "pnl": -0.5613002260620504,
+            "pct": -0.45858412152479683,
+            "fee": 0.05541071095190731,
+            "reason": "STOP_LOSS",
+            "time": "2026-11-15 09:36:26.619675+00:00"
         }
     ],
     "last_daily_report": "2026-11-15",
