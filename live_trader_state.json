@@ -1,19 +1,6 @@
 {
-    "balance": 135.9581507740785,
+    "balance": 133.60963546580916,
     "positions": {
-        "ETH/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 1805.03,
-            "quantity": 0.13749606619611224,
-            "stop_loss": 1818.09,
-            "take_profit": 1772.38,
-            "tp1": 1788.705,
-            "margin_cost": 12.409226218298423,
-            "entry_fee": 0.12409226218298423,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
-            "opened_at": "2026-11-16 09:12:23.489016+00:00"
-        },
         "BNB/USDT:USDT": {
             "side": "SHORT",
             "entry": 589.91,
@@ -509,6 +496,15 @@
             "fee": 0.05032689293283253,
             "reason": "TAKE_PROFIT_2",
             "time": "2026-11-16 06:16:18.938622+00:00"
+        },
+        {
+            "symbol": "ETH/USDT:USDT",
+            "side": "SHORT",
+            "pnl": -2.3485153082693246,
+            "pct": -0.8958299862052195,
+            "fee": 0.1252039178781798,
+            "reason": "STOP_LOSS",
+            "time": "2026-11-16 14:26:39.309073+00:00"
         }
     ],
     "last_daily_report": "2026-11-16",
