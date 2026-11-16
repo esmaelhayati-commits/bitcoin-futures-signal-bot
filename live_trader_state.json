@@ -1,6 +1,33 @@
 {
-    "balance": 127.95711750218041,
-    "positions": {},
+    "balance": 127.69797107459671,
+    "positions": {
+        "ETH/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 1832.69,
+            "quantity": 0.1504143020653684,
+            "stop_loss": 1843.61777716421,
+            "take_profit": 1805.370557089475,
+            "tp1": 1819.0302785447375,
+            "margin_cost": 13.783139362609,
+            "entry_fee": 0.13783139362609,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-16 22:33:25.615182+00:00"
+        },
+        "XRP/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 0.9614,
+            "quantity": 252.37161214397617,
+            "stop_loss": 0.9680356877839245,
+            "take_profit": 0.944810780540189,
+            "tp1": 0.9531053902700946,
+            "margin_cost": 12.131503395760934,
+            "entry_fee": 0.12131503395760934,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-16 22:33:29.572945+00:00"
+        }
+    },
     "trade_history": [
         {
             "symbol": "BTC/USDT:USDT",
