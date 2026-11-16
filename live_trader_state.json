@@ -1,20 +1,6 @@
 {
-    "balance": 133.89714490109236,
-    "positions": {
-        "AVAX/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 7.264,
-            "quantity": 14.1885799077622,
-            "stop_loss": 7.256736,
-            "take_profit": 7.103368392600867,
-            "tp1": 7.183684196300433,
-            "margin_cost": 10.306584444998462,
-            "entry_fee": 0.10306584444998462,
-            "is_tp1_hit": true,
-            "is_breakeven": true,
-            "opened_at": "2026-11-15 21:00:26.117011+00:00"
-        }
-    },
+    "balance": 136.2588765924791,
+    "positions": {},
     "trade_history": [
         {
             "symbol": "BTC/USDT:USDT",
@@ -487,6 +473,15 @@
             "fee": 0.05096313862566859,
             "reason": "PARTIAL_TP1",
             "time": "2026-11-16 01:27:48.774660+00:00"
+        },
+        {
+            "symbol": "AVAX/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 2.3617316913867406,
+            "pct": 2.340308370044052,
+            "fee": 0.05032689293283253,
+            "reason": "TAKE_PROFIT_2",
+            "time": "2026-11-16 06:16:18.938622+00:00"
         }
     ],
     "last_daily_report": "2026-11-16",
