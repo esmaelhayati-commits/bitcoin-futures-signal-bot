@@ -1,5 +1,5 @@
 {
-    "balance": 128.57517046160484,
+    "balance": 128.39325771351736,
     "positions": {
         "XRP/USDT:USDT": {
             "side": "SHORT",
@@ -13,6 +13,19 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-16 22:33:29.572945+00:00"
+        },
+        "BTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 64872.3,
+            "quantity": 0.005608333544131414,
+            "stop_loss": 65151.31372991386,
+            "take_profit": 64174.765675215356,
+            "tp1": 64523.53283760768,
+            "margin_cost": 18.191274808747814,
+            "entry_fee": 0.18191274808747815,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-17 05:45:56.827882+00:00"
         }
     },
     "trade_history": [
