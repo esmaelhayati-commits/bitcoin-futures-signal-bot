@@ -1,11 +1,12 @@
 import numpy as np
 import pandas as pd
 
-STRATEGY_VERSION = "2.3"
+STRATEGY_VERSION = "2.4"
 MIN_CANDLES = 120
 
 SWING_LOOKBACK = 5
 FVG_THRESHOLD_PCT = 0.0015
+MAX_FVG_AGE_CANDLES = 20        # FVG must be formed within the last 20 candles (5 hours on 15m)
 RR_RATIO = 2.5
 
 ATR_PERIOD = 14
@@ -78,8 +79,9 @@ def identify_swings(df: pd.DataFrame, lookback: int = SWING_LOOKBACK):
 def detect_fvg(df: pd.DataFrame):
     fvg_bullish = []
     fvg_bearish = []
+    start_idx = max(2, len(df) - MAX_FVG_AGE_CANDLES)
 
-    for i in range(2, len(df)):
+    for i in range(start_idx, len(df) - 1):
         c1_high, c1_low = df["high"].iloc[i - 2], df["low"].iloc[i - 2]
         c3_high, c3_low = df["high"].iloc[i], df["low"].iloc[i]
         c2_close = df["close"].iloc[i - 1]
@@ -90,7 +92,7 @@ def detect_fvg(df: pd.DataFrame):
                 fvg_bullish.append({
                     "top": float(c3_low),
                     "bottom": float(c1_high),
-                    "index": df.index[i - 1]
+                    "pos": i - 1
                 })
 
         if c3_high < c1_low:
@@ -99,7 +101,7 @@ def detect_fvg(df: pd.DataFrame):
                 fvg_bearish.append({
                     "top": float(c1_low),
                     "bottom": float(c3_high),
-                    "index": df.index[i - 1]
+                    "pos": i - 1
                 })
 
     return fvg_bullish, fvg_bearish
@@ -175,10 +177,12 @@ def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFram
         "risk_reward": RR_RATIO,
     }
 
+    # Bullish Setup: Price taps fresh Bullish FVG and closes above FVG bottom
     if d4_bullish and structure_1h in ["BULLISH_BOS", "RANGE"]:
         if bullish_fvgs:
             recent_fvg = bullish_fvgs[-1]
-            if recent_fvg["bottom"] <= current_low <= recent_fvg["top"] and current_price > current_open:
+            tapped_fvg = current_low <= recent_fvg["top"] and current_price >= recent_fvg["bottom"]
+            if tapped_fvg and current_price > current_open:
                 stop = min(recent_fvg["bottom"], current_price - (1.3 * atr))
                 risk = current_price - stop
                 target = current_price + (risk * RR_RATIO)
@@ -192,13 +196,15 @@ def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFram
                     "target": target,
                     "take_profit": target,
                     "confidence": 85,
-                    "reason": "تایید شکست ساختار 1H + پولبک به FVG نقدینگی در 15M",
+                    "reason": "تایید شکست ساختار 1H + پولبک به FVG معتبر در 15M",
                 }
 
+    # Bearish Setup: Price taps fresh Bearish FVG and closes below FVG top
     if not d4_bullish and structure_1h in ["BEARISH_BOS", "RANGE"]:
         if bearish_fvgs:
             recent_fvg = bearish_fvgs[-1]
-            if recent_fvg["bottom"] <= current_high <= recent_fvg["top"] and current_price < current_open:
+            tapped_fvg = current_high >= recent_fvg["bottom"] and current_price <= recent_fvg["top"]
+            if tapped_fvg and current_price < current_open:
                 stop = max(recent_fvg["top"], current_price + (1.3 * atr))
                 risk = stop - current_price
                 target = current_price - (risk * RR_RATIO)
@@ -212,7 +218,7 @@ def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFram
                     "target": target,
                     "take_profit": target,
                     "confidence": 85,
-                    "reason": "شکست ساختار نزولی 1H + تاچ ناحیه عرضه FVG در 15M",
+                    "reason": "شکست ساختار نزولی 1H + تاچ ناحیه عرضه FVG معتبر در 15M",
                 }
 
     return hold("NO_SMC_SETUP", **common)
