@@ -1,5 +1,5 @@
 {
-    "balance": 124.18981996093571,
+    "balance": 122.21405815072089,
     "positions": {
         "BTC/USDT:USDT": {
             "side": "SHORT",
@@ -13,19 +13,6 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-17 16:39:01.693659+00:00"
-        },
-        "ETH/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 1785.01,
-            "quantity": 0.10089763299703462,
-            "stop_loss": 1801.7011228751676,
-            "take_profit": 1743.2821928120811,
-            "tp1": 1764.1460964060407,
-            "margin_cost": 9.00516419380184,
-            "entry_fee": 0.09005164193801839,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
-            "opened_at": "2026-11-17 18:28:58.735852+00:00"
         }
     },
     "trade_history": [
@@ -599,6 +586,15 @@
             "fee": 0.08514827874569654,
             "reason": "STOP_LOSS",
             "time": "2026-11-17 18:28:56.925622+00:00"
+        },
+        {
+            "symbol": "ETH/USDT:USDT",
+            "side": "SHORT",
+            "pnl": -1.9757618102148238,
+            "pct": -1.046492736735372,
+            "fee": 0.09099402583021068,
+            "reason": "STOP_LOSS",
+            "time": "2026-11-17 22:17:34.996235+00:00"
         }
     ],
     "last_daily_report": "2026-11-17",
