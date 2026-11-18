@@ -1,17 +1,17 @@
 import numpy as np
 import pandas as pd
 
-STRATEGY_VERSION = "2.4"
+STRATEGY_VERSION = "3.0"
 MIN_CANDLES = 120
 
 SWING_LOOKBACK = 5
 FVG_THRESHOLD_PCT = 0.0015
-MAX_FVG_AGE_CANDLES = 20        # FVG must be formed within the last 20 candles (5 hours on 15m)
+MAX_FVG_AGE_CANDLES = 20
 RR_RATIO = 2.5
 
 ATR_PERIOD = 14
-STOP_ATR_MULTIPLIER = 1.5
-TARGET_ATR_MULTIPLIER = 3.0
+ADX_PERIOD = 14
+MIN_ADX_TREND = 22.0            # Minimum trend strength to avoid choppy/range markets
 
 
 def validate_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -47,13 +47,29 @@ def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
 
-def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
-    out = validate_data(df)
-    out["ema20"] = out["close"].ewm(span=20, adjust=False).mean()
-    out["ema50"] = out["close"].ewm(span=50, adjust=False).mean()
-    out["ema200"] = out["close"].ewm(span=200, adjust=False).mean()
-    out["atr"] = calculate_atr(out)
-    return out
+def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.Series:
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1 / period, adjust=False).mean()
+    plus_di = 100 * (pd.Series(plus_dm, index=df.index).ewm(alpha=1 / period, adjust=False).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm, index=df.index).ewm(alpha=1 / period, adjust=False).mean() / atr)
+
+    dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).fillna(0)
+    return dx.ewm(alpha=1 / period, adjust=False).mean()
 
 
 def identify_swings(df: pd.DataFrame, lookback: int = SWING_LOOKBACK):
@@ -157,12 +173,26 @@ def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFram
     if not np.isfinite(atr) or atr <= 0:
         return hold("INVALID_ATR", symbol=symbol)
 
-    structure_1h, _, _ = detect_market_structure(d1)
-    ema50_4h = d4["close"].ewm(span=50, adjust=False).mean().iloc[-1]
-    d4_bullish = d4["close"].iloc[-1] > ema50_4h
+    # 1. Trend Strength Filter on 1H (Blocks choppy/range markets automatically)
+    adx_1h = float(calculate_adx(d1).iloc[-1])
+    if adx_1h < MIN_ADX_TREND:
+        return hold(f"LOW_TREND_STRENGTH_ADX_{adx_1h:.1f}", symbol=symbol)
 
-    trend_1h_label = "BULLISH" if structure_1h == "BULLISH_BOS" else ("BEARISH" if structure_1h == "BEARISH_BOS" else "SIDEWAYS")
-    trend_4h_label = "BULLISH" if d4_bullish else "BEARISH"
+    # 2. Strict Market Structure on 1H (Requires confirmed BOS, no RANGE trades)
+    structure_1h, _, _ = detect_market_structure(d1)
+    if structure_1h == "RANGE":
+        return hold("MARKET_IN_RANGE_1H", symbol=symbol)
+
+    # 3. 4H Macro Trend Alignment (Price vs EMA50 & EMA20 slope)
+    ema20_4h = d4["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50_4h = d4["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+    d4_close = float(d4["close"].iloc[-1])
+
+    d4_bullish = (d4_close > ema50_4h) and (d4_close > ema20_4h)
+    d4_bearish = (d4_close < ema50_4h) and (d4_close < ema20_4h)
+
+    trend_1h_label = "BULLISH" if structure_1h == "BULLISH_BOS" else "BEARISH"
+    trend_4h_label = "BULLISH" if d4_bullish else ("BEARISH" if d4_bearish else "TRANSITION")
 
     bullish_fvgs, bearish_fvgs = detect_fvg(d15)
 
@@ -171,14 +201,15 @@ def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFram
         "entry": current_price,
         "entry_price": current_price,
         "atr": atr,
+        "adx_1h": round(adx_1h, 2),
         "trend_1h": trend_1h_label,
         "trend_4h": trend_4h_label,
         "strategy_version": STRATEGY_VERSION,
         "risk_reward": RR_RATIO,
     }
 
-    # Bullish Setup: Price taps fresh Bullish FVG and closes above FVG bottom
-    if d4_bullish and structure_1h in ["BULLISH_BOS", "RANGE"]:
+    # Bullish Setup: Confirmed 4H Uptrend + 1H Bullish BOS + Strong ADX + Fresh FVG Tap
+    if d4_bullish and structure_1h == "BULLISH_BOS":
         if bullish_fvgs:
             recent_fvg = bullish_fvgs[-1]
             tapped_fvg = current_low <= recent_fvg["top"] and current_price >= recent_fvg["bottom"]
@@ -195,12 +226,12 @@ def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFram
                     "stop_loss": stop,
                     "target": target,
                     "take_profit": target,
-                    "confidence": 85,
-                    "reason": "تایید شکست ساختار 1H + پولبک به FVG معتبر در 15M",
+                    "confidence": 90,
+                    "reason": "روند صعودی تایید شده (4H + 1H BOS + ADX) + پولبک به FVG معتبر",
                 }
 
-    # Bearish Setup: Price taps fresh Bearish FVG and closes below FVG top
-    if not d4_bullish and structure_1h in ["BEARISH_BOS", "RANGE"]:
+    # Bearish Setup: Confirmed 4H Downtrend + 1H Bearish BOS + Strong ADX + Fresh FVG Tap
+    if d4_bearish and structure_1h == "BEARISH_BOS":
         if bearish_fvgs:
             recent_fvg = bearish_fvgs[-1]
             tapped_fvg = current_high >= recent_fvg["bottom"] and current_price <= recent_fvg["top"]
@@ -217,8 +248,8 @@ def analyze_market(df_15m: pd.DataFrame, df_1h: pd.DataFrame, df_4h: pd.DataFram
                     "stop_loss": stop,
                     "target": target,
                     "take_profit": target,
-                    "confidence": 85,
-                    "reason": "شکست ساختار نزولی 1H + تاچ ناحیه عرضه FVG معتبر در 15M",
+                    "confidence": 90,
+                    "reason": "روند نزولی تایید شده (4H + 1H BOS + ADX) + تاچ ناحیه عرضه FVG معتبر",
                 }
 
     return hold("NO_SMC_SETUP", **common)
