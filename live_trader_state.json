@@ -1,18 +1,31 @@
 {
-    "balance": 111.57518317043002,
+    "balance": 112.44953158420016,
     "positions": {
         "LTC/USDT:USDT": {
             "side": "SHORT",
             "entry": 42.32,
-            "quantity": 3.0350031693853254,
-            "stop_loss": 42.84,
+            "quantity": 1.5175015846926627,
+            "stop_loss": 42.277680000000004,
             "take_profit": 41.019999999999996,
             "tp1": 41.67,
             "margin_cost": 6.422066706419349,
             "entry_fee": 0.06422066706419349,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
+            "opened_at": "2026-11-19 20:32:13.095694+00:00"
+        },
+        "BNB/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 571.83,
+            "quantity": 0.28123907721885855,
+            "stop_loss": 577.26,
+            "take_profit": 558.2550000000001,
+            "tp1": 565.0425,
+            "margin_cost": 8.041047076302995,
+            "entry_fee": 0.08041047076302996,
             "is_tp1_hit": false,
             "is_breakeven": false,
-            "opened_at": "2026-11-19 20:32:13.095694+00:00"
+            "opened_at": "2026-11-20 04:24:34.627970+00:00"
         }
     },
     "trade_history": [
@@ -631,6 +644,15 @@
             "fee": 0.06530529466994875,
             "reason": "STOP_LOSS",
             "time": "2026-11-20 03:28:34.320100+00:00"
+        },
+        {
+            "symbol": "LTC/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 0.9547588845331569,
+            "pct": 1.795841209829863,
+            "fee": 0.031617145517071635,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-20 04:24:28.043291+00:00"
         }
     ],
     "last_daily_report": "2026-11-20",
