@@ -1,5 +1,5 @@
 {
-    "balance": 113.71197814685353,
+    "balance": 113.64767644617412,
     "positions": {
         "LTC/USDT:USDT": {
             "side": "SHORT",
@@ -13,6 +13,19 @@
             "is_tp1_hit": false,
             "is_breakeven": false,
             "opened_at": "2026-11-19 20:32:13.095694+00:00"
+        },
+        "SOL/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 71.76,
+            "quantity": 1.7921321259590768,
+            "stop_loss": 72.64,
+            "take_profit": 69.56000000000002,
+            "tp1": 70.66000000000001,
+            "margin_cost": 6.430170067941168,
+            "entry_fee": 0.06430170067941168,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-20 02:39:40.105367+00:00"
         }
     },
     "trade_history": [
