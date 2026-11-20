@@ -1,17 +1,17 @@
 {
-    "balance": 121.02577476344165,
+    "balance": 122.05511453339783,
     "positions": {
         "SOL/USDT:USDT": {
             "side": "SHORT",
             "entry": 68.73,
-            "quantity": 1.625763189102263,
-            "stop_loss": 69.77,
+            "quantity": 0.8128815945511315,
+            "stop_loss": 68.66127,
             "take_profit": 66.13000000000002,
             "tp1": 67.43,
             "margin_cost": 5.586935199349927,
             "entry_fee": 0.055869351993499274,
-            "is_tp1_hit": false,
-            "is_breakeven": false,
+            "is_tp1_hit": true,
+            "is_breakeven": true,
             "opened_at": "2026-11-20 16:35:05.198159+00:00"
         },
         "BNB/USDT:USDT": {
@@ -680,6 +680,15 @@
             "fee": 0.038350527021427015,
             "reason": "PARTIAL_TP1",
             "time": "2026-11-20 19:39:53.310617+00:00"
+        },
+        {
+            "symbol": "SOL/USDT:USDT",
+            "side": "SHORT",
+            "pnl": 1.0293397699561773,
+            "pct": 2.0515058926233243,
+            "fee": 0.027406302960291402,
+            "reason": "PARTIAL_TP1",
+            "time": "2026-11-20 21:14:21.553684+00:00"
         }
     ],
     "last_daily_report": "2026-11-20",
