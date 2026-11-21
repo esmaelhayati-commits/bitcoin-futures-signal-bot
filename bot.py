@@ -17,13 +17,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 API_KEY = os.getenv("XT_API_KEY")
 API_SECRET = os.getenv("XT_API_SECRET")
 
-LIVE_TRADING = False
+LIVE_TRADING = False            # Switch to True only after XT API setup and backtest verification
 LEVERAGE = 20
-RISK_PER_TRADE = 0.015          # 1.5% risk per trade
-MAX_OPEN_POSITIONS = 2          # Reduced from 3 to 2 for correlation protection
-MAX_SAME_SIDE_POSITIONS = 2     # Max 2 positions in the same direction
-MIN_SL_PCT = 0.004              # Minimum 0.4% SL distance to prevent oversized lots
-FEE_RATE = 0.0005               # 0.05% taker fee per side (XT Futures standard)
+RISK_PER_TRADE = 0.015          # 1.5% max risk per trade
+MAX_OPEN_POSITIONS = 2
+MAX_SAME_SIDE_POSITIONS = 2
+MIN_SL_PCT = 0.004              # Minimum 0.4% SL distance
+COOLDOWN_MINUTES = 60           # Prevent re-entering the same symbol within 60 minutes
+FEE_RATE = 0.0005               # 0.05% taker fee per side
 INITIAL_BALANCE = 100.0
 STATE_FILE = "live_trader_state.json"
 
@@ -51,6 +52,7 @@ if LIVE_TRADING and API_KEY and API_SECRET:
 
 exchange = ccxt.xt(exchange_params)
 
+
 # ==================== STATE MANAGEMENT ====================
 def load_state():
     now_utc = datetime.now(timezone.utc)
@@ -58,6 +60,8 @@ def load_state():
         "balance": INITIAL_BALANCE,
         "positions": {},
         "trade_history": [],
+        "symbol_cooldowns": {},
+        "last_signal_candles": {},
         "last_daily_report": str(now_utc.date()),
         "last_weekly_report": f"{now_utc.year}-W{now_utc.isocalendar()[1]}",
         "last_monthly_report": f"{now_utc.year}-{now_utc.month:02d}"
@@ -72,12 +76,14 @@ def load_state():
             logging.error("Failed to load state: %s", e)
     return default_state
 
+
 def save_state(state):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=4, ensure_ascii=False)
     except Exception as e:
         logging.error("Failed to save state: %s", e)
+
 
 # ==================== TELEGRAM NOTIFIER ====================
 def send_telegram(text: str):
@@ -90,19 +96,62 @@ def send_telegram(text: str):
     except Exception as e:
         logging.error("Telegram send error: %s", e)
 
-# ==================== MARKET DATA ====================
-def fetch_candles(symbol: str, timeframe: str):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
-    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df = df.iloc[:-1].copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return df.reset_index(drop=True)
+
+# ==================== MARKET DATA (CLOSED CANDLES ONLY) ====================
+def fetch_candles(symbol: str, timeframe: str, retries: int = 3):
+    for attempt in range(retries):
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
+            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            # Strictly drop the unclosed forming candle (iloc[-1]) to prevent repainting
+            df = df.iloc[:-1].copy()
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+            return df.reset_index(drop=True)
+        except Exception as e:
+            if attempt == retries - 1:
+                raise e
+            time.sleep(1.5)
+
+
+# ==================== LIVE EXCHANGE EXECUTION HELPERS ====================
+def execute_live_entry(symbol: str, side: str, raw_qty: float, stop_loss: float, take_profit: float):
+    """Places real market entry + server-side SL/TP orders on XT exchange when LIVE_TRADING=True."""
+    exchange.set_leverage(LEVERAGE, symbol)
+    qty = float(exchange.amount_to_precision(symbol, raw_qty))
+    sl_price = float(exchange.price_to_precision(symbol, stop_loss))
+    tp_price = float(exchange.price_to_precision(symbol, take_profit))
+
+    order_side = "buy" if side == "LONG" else "sell"
+    close_side = "sell" if side == "LONG" else "buy"
+
+    entry_order = exchange.create_market_order(symbol, order_side, qty)
+    filled_price = float(entry_order.get("average") or entry_order.get("price") or 0)
+
+    # Attach server-side Stop Loss and Take Profit orders
+    exchange.create_order(
+        symbol, "market", close_side, qty, None,
+        params={"stopPrice": sl_price, "reduceOnly": True}
+    )
+    exchange.create_order(
+        symbol, "market", close_side, qty, None,
+        params={"stopPrice": tp_price, "reduceOnly": True}
+    )
+    return qty, filled_price
+
+
+def close_live_position(symbol: str, side: str, qty: float):
+    close_side = "sell" if side == "LONG" else "buy"
+    clean_qty = float(exchange.amount_to_precision(symbol, qty))
+    if clean_qty > 0:
+        exchange.create_market_order(symbol, close_side, clean_qty, params={"reduceOnly": True})
+
 
 # ==================== POSITION & EXIT MANAGEMENT ====================
 def manage_positions(state):
     positions = state.get("positions", {})
     remaining_positions = {}
-    now_str = str(datetime.now(timezone.utc))
+    now_dt = datetime.now(timezone.utc)
+    now_str = str(now_dt)
 
     for symbol, pos in positions.items():
         try:
@@ -129,10 +178,18 @@ def manage_positions(state):
 
             # 1. Stop Loss or Breakeven Exit
             if hit_sl:
+                if LIVE_TRADING:
+                    try:
+                        exchange.cancel_all_orders(symbol)
+                        close_live_position(symbol, side, qty)
+                    except Exception as ex:
+                        logging.error("Live SL close error on %s: %s", symbol, ex)
+
                 gross_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
                 exit_fee = (current_price * qty) * FEE_RATE
                 net_pnl = gross_pnl - exit_fee
                 state["balance"] += net_pnl
+                state.setdefault("symbol_cooldowns", {})[symbol] = now_dt.isoformat()
 
                 reason = "BREAKEVEN (Risk-Free)" if pos.get("is_breakeven") and gross_pnl >= 0 else "STOP_LOSS"
 
@@ -156,10 +213,18 @@ def manage_positions(state):
 
             # 2. Final TP2 Hit (Full Close)
             if hit_tp2:
+                if LIVE_TRADING:
+                    try:
+                        exchange.cancel_all_orders(symbol)
+                        close_live_position(symbol, side, qty)
+                    except Exception as ex:
+                        logging.error("Live TP2 close error on %s: %s", symbol, ex)
+
                 gross_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
                 exit_fee = (current_price * qty) * FEE_RATE
                 net_pnl = gross_pnl - exit_fee
                 state["balance"] += net_pnl
+                state.setdefault("symbol_cooldowns", {})[symbol] = now_dt.isoformat()
 
                 lines = [
                     "🎉 <b>Target 2 Hit (Full Close)</b>",
@@ -181,13 +246,18 @@ def manage_positions(state):
 
             # 3. Partial TP1 Hit (50% Close + Breakeven)
             if hit_tp1:
-                close_qty = qty / 2
+                close_qty = qty / 2.0
+                if LIVE_TRADING:
+                    try:
+                        close_live_position(symbol, side, close_qty)
+                    except Exception as ex:
+                        logging.error("Live TP1 partial close error on %s: %s", symbol, ex)
+
                 gross_pnl = (tp1 - entry) * close_qty if side == "LONG" else (entry - tp1) * close_qty
                 exit_fee = (tp1 * close_qty) * FEE_RATE
                 realized_pnl = gross_pnl - exit_fee
                 state["balance"] += realized_pnl
 
-                # Move SL slightly past entry to cover exit fee for true risk-free
                 fee_buffer = entry * (FEE_RATE * 2)
                 breakeven_sl = entry + fee_buffer if side == "LONG" else entry - fee_buffer
 
@@ -220,20 +290,44 @@ def manage_positions(state):
 
     state["positions"] = remaining_positions
 
+
 # ==================== OPENING POSITIONS ====================
+def is_in_cooldown(symbol: str, state: dict) -> bool:
+    last_closed_str = state.get("symbol_cooldowns", {}).get(symbol)
+    if not last_closed_str:
+        return False
+    try:
+        last_closed = datetime.fromisoformat(last_closed_str)
+        elapsed_minutes = (datetime.now(timezone.utc) - last_closed).total_seconds() / 60.0
+        return elapsed_minutes < COOLDOWN_MINUTES
+    except Exception:
+        return False
+
+
 def open_position(symbol, signal_data, state):
     side = signal_data["signal"]
     entry = float(signal_data["entry_price"])
     stop = float(signal_data["stop_loss"])
     target = float(signal_data["take_profit"])
+    candle_time = signal_data.get("candle_time", "")
+    confidence = signal_data.get("confidence", 0)
 
-    # Check correlation / same-side limit
+    # Prevent duplicate signal on the exact same 15m candle
+    if candle_time and state.get("last_signal_candles", {}).get(symbol) == candle_time:
+        return False
+
+    # Prevent re-entry during cooldown
+    if is_in_cooldown(symbol, state):
+        logging.info("Skipping %s: in %d-min cooldown.", symbol, COOLDOWN_MINUTES)
+        return False
+
+    # Correlation protection
     same_side_count = sum(1 for p in state.get("positions", {}).values() if p.get("side") == side)
     if same_side_count >= MAX_SAME_SIDE_POSITIONS:
         logging.info("Skipping %s (%s): max same-side positions reached.", symbol, side)
         return False
 
-    # Enforce minimum Stop Loss distance (0.4%) to prevent oversized leverage exposure
+    # Minimum Stop Loss distance (0.4%)
     min_sl_dist = entry * MIN_SL_PCT
     raw_risk = abs(entry - stop)
     if raw_risk == 0:
@@ -253,28 +347,40 @@ def open_position(symbol, signal_data, state):
             bal_data = exchange.fetch_balance()
             balance = float(bal_data["USDT"]["free"])
             state["balance"] = balance
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error("Live balance fetch error: %s", e)
+            return False
 
-    # Cap total risk at 1.5% of balance (accounting for estimated round-trip fees)
     risk_amount = balance * RISK_PER_TRADE
     effective_risk_per_unit = price_risk + (entry * FEE_RATE * 2)
     quantity = risk_amount / effective_risk_per_unit
+
+    if LIVE_TRADING:
+        try:
+            quantity, filled_entry = execute_live_entry(symbol, side, quantity, stop, target)
+            if filled_entry > 0:
+                entry = filled_entry
+                tp1 = entry + (target - entry) * 0.5
+        except Exception as e:
+            logging.error("Live order execution failed on %s: %s", symbol, e)
+            send_telegram(f"⚠️ <b>Live Order Failed</b> on <code>{symbol}</code>: {e}")
+            return False
 
     notional_value = quantity * entry
     margin_cost = notional_value / LEVERAGE
     entry_fee = notional_value * FEE_RATE
 
-    # Ensure sufficient free margin
     used_margin = sum(p.get("margin_cost", 0.0) for p in state.get("positions", {}).values())
     free_balance = balance - used_margin
     if margin_cost + entry_fee > free_balance * 0.9:
         logging.info("Skipping %s: insufficient free margin.", symbol)
         return False
 
-    # Deduct entry fee immediately from balance for realistic tracking
     state["balance"] -= entry_fee
     remaining_free = state["balance"] - (used_margin + margin_cost)
+
+    if candle_time:
+        state.setdefault("last_signal_candles", {})[symbol] = candle_time
 
     state["positions"][symbol] = {
         "side": side,
@@ -290,11 +396,12 @@ def open_position(symbol, signal_data, state):
         "opened_at": str(datetime.now(timezone.utc))
     }
 
+    mode_tag = "LIVE" if LIVE_TRADING else "PAPER"
     lines = [
-        f"⚡ <b>New Position Opened ({side})</b>",
+        f"⚡ <b>New Position Opened ({side} | {mode_tag})</b>",
         "------------------------------------",
         f"Symbol: <code>{symbol}</code>",
-        f"Leverage: <b>{LEVERAGE}x</b>",
+        f"Confidence: <b>{confidence}%</b> | Leverage: <b>{LEVERAGE}x</b>",
         f"Entry: <code>{entry:.4f}</code>",
         f"Stop Loss: <code>{stop:.4f}</code> (Max Risk: ${risk_amount:.2f})",
         f"TP1 (50% Close): <code>{tp1:.4f}</code>",
@@ -307,6 +414,7 @@ def open_position(symbol, signal_data, state):
     ]
     send_telegram("\n".join(lines))
     return True
+
 
 # ==================== REPORTING (DAILY / WEEKLY / MONTHLY) ====================
 def generate_report_text(title: str, timeframe_label: str, trades: list, current_open_count: int, balance: float) -> str:
@@ -338,6 +446,7 @@ def generate_report_text(title: str, timeframe_label: str, trades: list, current
     ]
     return "\n".join(lines)
 
+
 def check_and_send_reports(state):
     now_utc = datetime.now(timezone.utc)
     today_str = str(now_utc.date())
@@ -348,24 +457,22 @@ def check_and_send_reports(state):
     open_count = len(state.get("positions", {}))
     balance = state.get("balance", INITIAL_BALANCE)
 
-    # 1. Daily Report
     if state.get("last_daily_report") != today_str:
         daily_trades = [t for t in trades if t.get("time", "").startswith(state.get("last_daily_report", ""))]
         rep = generate_report_text("Daily Performance Report (24H)", state.get("last_daily_report"), daily_trades, open_count, balance)
         send_telegram(rep)
         state["last_daily_report"] = today_str
 
-    # 2. Weekly Report
     if state.get("last_weekly_report") != current_week:
         rep = generate_report_text("Weekly Performance Report", state.get("last_weekly_report"), trades, open_count, balance)
         send_telegram(rep)
         state["last_weekly_report"] = current_week
 
-    # 3. Monthly Report
     if state.get("last_monthly_report") != current_month:
         rep = generate_report_text("Monthly Performance Report", state.get("last_monthly_report"), trades, open_count, balance)
         send_telegram(rep)
         state["last_monthly_report"] = current_month
+
 
 # ==================== MAIN SCANNER ====================
 def main():
@@ -398,6 +505,7 @@ def main():
 
     check_and_send_reports(state)
     save_state(state)
+
 
 if __name__ == "__main__":
     main()
