@@ -7,7 +7,7 @@ import requests
 import ccxt
 import pandas as pd
 from dotenv import load_dotenv
-from strategy import analyze_market
+from strategy import analyze_market, SignalGuard
 
 load_dotenv()
 
@@ -17,16 +17,18 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 API_KEY = os.getenv("XT_API_KEY")
 API_SECRET = os.getenv("XT_API_SECRET")
 
-LIVE_TRADING = False            # Switch to True only after XT API setup and backtest verification
+LIVE_TRADING = False            # Switch to True only after XT API setup and validation
 LEVERAGE = 20
 RISK_PER_TRADE = 0.015          # 1.5% max risk per trade
 MAX_OPEN_POSITIONS = 2
 MAX_SAME_SIDE_POSITIONS = 2
 MIN_SL_PCT = 0.004              # Minimum 0.4% SL distance
-COOLDOWN_MINUTES = 60           # Prevent re-entering the same symbol within 60 minutes
+COOLDOWN_MINUTES = 60           # Prevent re-entering same symbol/side within 60 minutes
 FEE_RATE = 0.0005               # 0.05% taker fee per side
 INITIAL_BALANCE = 100.0
+
 STATE_FILE = "live_trader_state.json"
+GUARD_STATE_FILE = "signal_guard_state.json"
 
 SYMBOLS = [
     "BTC/USDT:USDT",
@@ -51,6 +53,7 @@ if LIVE_TRADING and API_KEY and API_SECRET:
     exchange_params.update({"apiKey": API_KEY, "secret": API_SECRET})
 
 exchange = ccxt.xt(exchange_params)
+signal_guard = SignalGuard(cooldown_minutes=COOLDOWN_MINUTES, path=GUARD_STATE_FILE)
 
 
 # ==================== STATE MANAGEMENT ====================
@@ -60,8 +63,6 @@ def load_state():
         "balance": INITIAL_BALANCE,
         "positions": {},
         "trade_history": [],
-        "symbol_cooldowns": {},
-        "last_signal_candles": {},
         "last_daily_report": str(now_utc.date()),
         "last_weekly_report": f"{now_utc.year}-W{now_utc.isocalendar()[1]}",
         "last_monthly_report": f"{now_utc.year}-{now_utc.month:02d}"
@@ -97,14 +98,13 @@ def send_telegram(text: str):
         logging.error("Telegram send error: %s", e)
 
 
-# ==================== MARKET DATA (CLOSED CANDLES ONLY) ====================
+# ==================== MARKET DATA (RAW -> CLOSED HANDLED IN STRATEGY) ====================
 def fetch_candles(symbol: str, timeframe: str, retries: int = 3):
+    """Fetches 250 candles; drop_unclosed() in strategy.py handles exact UTC candle closure."""
     for attempt in range(retries):
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=220)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=250)
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            # Strictly drop the unclosed forming candle (iloc[-1]) to prevent repainting
-            df = df.iloc[:-1].copy()
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
             return df.reset_index(drop=True)
         except Exception as e:
@@ -127,7 +127,6 @@ def execute_live_entry(symbol: str, side: str, raw_qty: float, stop_loss: float,
     entry_order = exchange.create_market_order(symbol, order_side, qty)
     filled_price = float(entry_order.get("average") or entry_order.get("price") or 0)
 
-    # Attach server-side Stop Loss and Take Profit orders
     exchange.create_order(
         symbol, "market", close_side, qty, None,
         params={"stopPrice": sl_price, "reduceOnly": True}
@@ -189,7 +188,6 @@ def manage_positions(state):
                 exit_fee = (current_price * qty) * FEE_RATE
                 net_pnl = gross_pnl - exit_fee
                 state["balance"] += net_pnl
-                state.setdefault("symbol_cooldowns", {})[symbol] = now_dt.isoformat()
 
                 reason = "BREAKEVEN (Risk-Free)" if pos.get("is_breakeven") and gross_pnl >= 0 else "STOP_LOSS"
 
@@ -224,7 +222,6 @@ def manage_positions(state):
                 exit_fee = (current_price * qty) * FEE_RATE
                 net_pnl = gross_pnl - exit_fee
                 state["balance"] += net_pnl
-                state.setdefault("symbol_cooldowns", {})[symbol] = now_dt.isoformat()
 
                 lines = [
                     "🎉 <b>Target 2 Hit (Full Close)</b>",
@@ -292,34 +289,14 @@ def manage_positions(state):
 
 
 # ==================== OPENING POSITIONS ====================
-def is_in_cooldown(symbol: str, state: dict) -> bool:
-    last_closed_str = state.get("symbol_cooldowns", {}).get(symbol)
-    if not last_closed_str:
-        return False
-    try:
-        last_closed = datetime.fromisoformat(last_closed_str)
-        elapsed_minutes = (datetime.now(timezone.utc) - last_closed).total_seconds() / 60.0
-        return elapsed_minutes < COOLDOWN_MINUTES
-    except Exception:
-        return False
-
-
 def open_position(symbol, signal_data, state):
     side = signal_data["signal"]
     entry = float(signal_data["entry_price"])
     stop = float(signal_data["stop_loss"])
     target = float(signal_data["take_profit"])
-    candle_time = signal_data.get("candle_time", "")
     confidence = signal_data.get("confidence", 0)
-
-    # Prevent duplicate signal on the exact same 15m candle
-    if candle_time and state.get("last_signal_candles", {}).get(symbol) == candle_time:
-        return False
-
-    # Prevent re-entry during cooldown
-    if is_in_cooldown(symbol, state):
-        logging.info("Skipping %s: in %d-min cooldown.", symbol, COOLDOWN_MINUTES)
-        return False
+    structure_1h = signal_data.get("structure_1h", "")
+    adx_1h = signal_data.get("adx_1h", 0)
 
     # Correlation protection
     same_side_count = sum(1 for p in state.get("positions", {}).values() if p.get("side") == side)
@@ -379,9 +356,6 @@ def open_position(symbol, signal_data, state):
     state["balance"] -= entry_fee
     remaining_free = state["balance"] - (used_margin + margin_cost)
 
-    if candle_time:
-        state.setdefault("last_signal_candles", {})[symbol] = candle_time
-
     state["positions"][symbol] = {
         "side": side,
         "entry": entry,
@@ -391,6 +365,7 @@ def open_position(symbol, signal_data, state):
         "tp1": tp1,
         "margin_cost": margin_cost,
         "entry_fee": entry_fee,
+        "zone_id": signal_data.get("zone_id", ""),
         "is_tp1_hit": False,
         "is_breakeven": False,
         "opened_at": str(datetime.now(timezone.utc))
@@ -401,7 +376,8 @@ def open_position(symbol, signal_data, state):
         f"⚡ <b>New Position Opened ({side} | {mode_tag})</b>",
         "------------------------------------",
         f"Symbol: <code>{symbol}</code>",
-        f"Confidence: <b>{confidence}%</b> | Leverage: <b>{LEVERAGE}x</b>",
+        f"Setup: <b>{structure_1h}</b> | ADX: <b>{adx_1h}</b> | Score: <b>{confidence}%</b>",
+        f"Leverage: <b>{LEVERAGE}x</b>",
         f"Entry: <code>{entry:.4f}</code>",
         f"Stop Loss: <code>{stop:.4f}</code> (Max Risk: ${risk_amount:.2f})",
         f"TP1 (50% Close): <code>{tp1:.4f}</code>",
@@ -439,73 +415,4 @@ def generate_report_text(title: str, timeframe_label: str, trades: list, current
         "",
         f"Total Closed Trades: <b>{total_trades}</b>",
         f"Wins: <code>{len(wins)}</code> | Losses: <code>{len(losses)}</code> | Breakeven: <code>{len(breakevens)}</code>",
-        f"Win Rate: <b>{win_rate:.1f}%</b>",
-        "",
-        f"Active Open Positions: <b>{current_open_count}</b>",
-        "------------------------------------"
-    ]
-    return "\n".join(lines)
-
-
-def check_and_send_reports(state):
-    now_utc = datetime.now(timezone.utc)
-    today_str = str(now_utc.date())
-    current_week = f"{now_utc.year}-W{now_utc.isocalendar()[1]}"
-    current_month = f"{now_utc.year}-{now_utc.month:02d}"
-
-    trades = state.get("trade_history", [])
-    open_count = len(state.get("positions", {}))
-    balance = state.get("balance", INITIAL_BALANCE)
-
-    if state.get("last_daily_report") != today_str:
-        daily_trades = [t for t in trades if t.get("time", "").startswith(state.get("last_daily_report", ""))]
-        rep = generate_report_text("Daily Performance Report (24H)", state.get("last_daily_report"), daily_trades, open_count, balance)
-        send_telegram(rep)
-        state["last_daily_report"] = today_str
-
-    if state.get("last_weekly_report") != current_week:
-        rep = generate_report_text("Weekly Performance Report", state.get("last_weekly_report"), trades, open_count, balance)
-        send_telegram(rep)
-        state["last_weekly_report"] = current_week
-
-    if state.get("last_monthly_report") != current_month:
-        rep = generate_report_text("Monthly Performance Report", state.get("last_monthly_report"), trades, open_count, balance)
-        send_telegram(rep)
-        state["last_monthly_report"] = current_month
-
-
-# ==================== MAIN SCANNER ====================
-def main():
-    state = load_state()
-    exchange.load_markets()
-
-    manage_positions(state)
-
-    current_open_count = len(state.get("positions", {}))
-
-    for symbol in SYMBOLS:
-        if current_open_count >= MAX_OPEN_POSITIONS:
-            break
-        if symbol in state.get("positions", {}):
-            continue
-
-        try:
-            df15 = fetch_candles(symbol, "15m")
-            df1 = fetch_candles(symbol, "1h")
-            df4 = fetch_candles(symbol, "4h")
-
-            sig = analyze_market(df15, df1, df4, symbol=symbol)
-            if sig.get("signal") in ["LONG", "SHORT"]:
-                if open_position(symbol, sig, state):
-                    current_open_count += 1
-
-            time.sleep(0.3)
-        except Exception as e:
-            logging.error("Scan error on %s: %s", symbol, e)
-
-    check_and_send_reports(state)
-    save_state(state)
-
-
-if __name__ == "__main__":
-    main()
+        f"
