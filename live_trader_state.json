@@ -1,6 +1,33 @@
 {
-    "balance": 124.08789754301003,
-    "positions": {},
+    "balance": 123.93671067051953,
+    "positions": {
+        "BTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 56117.9,
+            "quantity": 0.0029892930800570513,
+            "stop_loss": 56684.443850887816,
+            "take_profit": 54701.540372780466,
+            "tp1": 55409.72018639023,
+            "margin_cost": 8.38764250686668,
+            "entry_fee": 0.08387642506866681,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-21 05:37:45.940115+00:00"
+        },
+        "LTC/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 38.36,
+            "quantity": 3.5094081033282345,
+            "stop_loss": 38.85166109244721,
+            "take_profit": 37.13084726888198,
+            "tp1": 37.74542363444099,
+            "margin_cost": 6.7310447421835535,
+            "entry_fee": 0.06731044742183553,
+            "is_tp1_hit": false,
+            "is_breakeven": false,
+            "opened_at": "2026-11-21 05:37:55.742550+00:00"
+        }
+    },
     "trade_history": [
         {
             "symbol": "BTC/USDT:USDT",
