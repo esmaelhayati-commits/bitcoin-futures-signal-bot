@@ -98,9 +98,8 @@ def send_telegram(text: str):
         logging.error("Telegram send error: %s", e)
 
 
-# ==================== MARKET DATA (RAW -> CLOSED HANDLED IN STRATEGY) ====================
+# ==================== MARKET DATA ====================
 def fetch_candles(symbol: str, timeframe: str, retries: int = 3):
-    """Fetches 250 candles; drop_unclosed() in strategy.py handles exact UTC candle closure."""
     for attempt in range(retries):
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=250)
@@ -115,7 +114,6 @@ def fetch_candles(symbol: str, timeframe: str, retries: int = 3):
 
 # ==================== LIVE EXCHANGE EXECUTION HELPERS ====================
 def execute_live_entry(symbol: str, side: str, raw_qty: float, stop_loss: float, take_profit: float):
-    """Places real market entry + server-side SL/TP orders on XT exchange when LIVE_TRADING=True."""
     exchange.set_leverage(LEVERAGE, symbol)
     qty = float(exchange.amount_to_precision(symbol, raw_qty))
     sl_price = float(exchange.price_to_precision(symbol, stop_loss))
@@ -298,13 +296,11 @@ def open_position(symbol, signal_data, state):
     structure_1h = signal_data.get("structure_1h", "")
     adx_1h = signal_data.get("adx_1h", 0)
 
-    # Correlation protection
     same_side_count = sum(1 for p in state.get("positions", {}).values() if p.get("side") == side)
     if same_side_count >= MAX_SAME_SIDE_POSITIONS:
         logging.info("Skipping %s (%s): max same-side positions reached.", symbol, side)
         return False
 
-    # Minimum Stop Loss distance (0.4%)
     min_sl_dist = entry * MIN_SL_PCT
     raw_risk = abs(entry - stop)
     if raw_risk == 0:
@@ -384,15 +380,15 @@ def open_position(symbol, signal_data, state):
         f"TP2 (Final): <code>{target:.4f}</code>",
         f"Quantity: <code>{quantity:.4f}</code>",
         "------------------------------------",
-        f"💵 <b>سرمایه درگیر (مارجین):</b> <code>{margin_cost:.2f} USDT</code>",
-        f"🧾 <b>کارمزد ورود:</b> <code>-{entry_fee:.4f} USDT</code>",
-        f"💰 <b>مانده حساب آزاد:</b> <code>{remaining_free:.2f} USDT</code>"
+        f"💵 <b>Margin Used:</b> <code>{margin_cost:.2f} USDT</code>",
+        f"🧾 <b>Entry Fee:</b> <code>-{entry_fee:.4f} USDT</code>",
+        f"💰 <b>Free Balance:</b> <code>{remaining_free:.2f} USDT</code>"
     ]
     send_telegram("\n".join(lines))
     return True
 
 
-# ==================== REPORTING (DAILY / WEEKLY / MONTHLY) ====================
+# ==================== REPORTING ====================
 def generate_report_text(title: str, timeframe_label: str, trades: list, current_open_count: int, balance: float) -> str:
     total_trades = len(trades)
     wins = [t for t in trades if t["pnl"] > 0]
@@ -415,4 +411,78 @@ def generate_report_text(title: str, timeframe_label: str, trades: list, current
         "",
         f"Total Closed Trades: <b>{total_trades}</b>",
         f"Wins: <code>{len(wins)}</code> | Losses: <code>{len(losses)}</code> | Breakeven: <code>{len(breakevens)}</code>",
-        f"
+        f"Win Rate: <b>{win_rate:.1f}%</b>",
+        "",
+        f"Active Open Positions: <b>{current_open_count}</b>",
+        "------------------------------------"
+    ]
+    return "\n".join(lines)
+
+
+def check_and_send_reports(state):
+    now_utc = datetime.now(timezone.utc)
+    today_str = str(now_utc.date())
+    current_week = f"{now_utc.year}-W{now_utc.isocalendar()[1]}"
+    current_month = f"{now_utc.year}-{now_utc.month:02d}"
+
+    trades = state.get("trade_history", [])
+    open_count = len(state.get("positions", {}))
+    balance = state.get("balance", INITIAL_BALANCE)
+
+    if state.get("last_daily_report") != today_str:
+        daily_trades = [t for t in trades if t.get("time", "").startswith(state.get("last_daily_report", ""))]
+        rep = generate_report_text("Daily Performance Report (24H)", state.get("last_daily_report"), daily_trades, open_count, balance)
+        send_telegram(rep)
+        state["last_daily_report"] = today_str
+
+    if state.get("last_weekly_report") != current_week:
+        rep = generate_report_text("Weekly Performance Report", state.get("last_weekly_report"), trades, open_count, balance)
+        send_telegram(rep)
+        state["last_weekly_report"] = current_week
+
+    if state.get("last_monthly_report") != current_month:
+        rep = generate_report_text("Monthly Performance Report", state.get("last_monthly_report"), trades, open_count, balance)
+        send_telegram(rep)
+        state["last_monthly_report"] = current_month
+
+
+# ==================== MAIN SCANNER ====================
+def main():
+    state = load_state()
+    exchange.load_markets()
+
+    manage_positions(state)
+
+    current_open_count = len(state.get("positions", {}))
+
+    for symbol in SYMBOLS:
+        if current_open_count >= MAX_OPEN_POSITIONS:
+            break
+        if symbol in state.get("positions", {}):
+            continue
+
+        try:
+            df15 = fetch_candles(symbol, "15m")
+            df1 = fetch_candles(symbol, "1h")
+            df4 = fetch_candles(symbol, "4h")
+
+            sig = analyze_market(df15, df1, df4, symbol=symbol, only_closed=True)
+            logging.info("%s -> %s (%s)", symbol, sig.get("code"), sig.get("reason"))
+
+            if sig.get("signal") in ["LONG", "SHORT"]:
+                if signal_guard.allow(sig):
+                    if open_position(symbol, sig, state):
+                        current_open_count += 1
+                else:
+                    logging.info("Signal blocked by SignalGuard on %s", symbol)
+
+            time.sleep(0.3)
+        except Exception as e:
+            logging.error("Scan error on %s: %s", symbol, e)
+
+    check_and_send_reports(state)
+    save_state(state)
+
+
+if __name__ == "__main__":
+    main()
