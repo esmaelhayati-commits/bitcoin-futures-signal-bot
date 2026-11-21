@@ -7,21 +7,21 @@ import pandas as pd
 
 logger = logging.getLogger("smc_strategy")
 
-STRATEGY_VERSION = "4.1"
-MIN_CANDLES = 200
+STRATEGY_VERSION = "4.2"
+MIN_CANDLES = 200               # indicator warm-up (EWM ADX/ATR need ~100+ candles)
 
 SWING_LOOKBACK = 5
-STRUCTURE_RECENT_CANDLES = 6
-MAX_FVG_AGE_CANDLES = 48
+STRUCTURE_RECENT_CANDLES = 6    # BOS/CHoCH must have happened within the last N closed 1H candles
+MAX_FVG_AGE_CANDLES = 48        # on 15m (= 12 hours)
 MIN_FVG_ATR_MULTIPLIER = 0.35
-MIN_MOVE_AWAY_ATR = 1.0
+MIN_MOVE_AWAY_ATR = 1.0         # price must leave the FVG by >= 1 ATR before the pullback counts
 STOP_BUFFER_ATR = 0.25
 MIN_STOP_ATR = 1.0
 MAX_STOP_ATR = 2.2
-RR_RATIO = 2.0
+RR_RATIO = 2.0                  # NET risk/reward (after fees + slippage)
 
-FEE_PCT_PER_SIDE = 0.0005
-SLIPPAGE_PCT_PER_SIDE = 0.0002
+FEE_PCT_PER_SIDE = 0.0005       # 0.05% (adjust to your exchange)
+SLIPPAGE_PCT_PER_SIDE = 0.0002  # 0.02%
 ROUND_TRIP_COST_PCT = 2 * (FEE_PCT_PER_SIDE + SLIPPAGE_PCT_PER_SIDE)
 
 ATR_PERIOD = 14
@@ -30,7 +30,11 @@ MIN_ADX_TREND = 22.0
 VOLUME_MA_PERIOD = 20
 
 
+# --------------------------------------------------------------------------
+# Data handling
+# --------------------------------------------------------------------------
 def _to_datetime(s: pd.Series) -> pd.Series:
+    """Handles datetime, epoch s/ms/us/ns (numeric or numeric strings) and ISO strings. Always UTC."""
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s, utc=True)
     num = pd.to_numeric(s, errors="coerce")
@@ -76,15 +80,35 @@ def validate_data(df: pd.DataFrame, tf_minutes: int) -> pd.DataFrame:
         & (out["volume"] >= 0) & (out["high"] >= out["low"])
     ].reset_index(drop=True)
 
+    if len(out) < 2:
+        return out[["timestamp"] + required]
+
+    # Reject only major gaps in the working window; 3.5x tolerates up to 2 skipped candles
+    # (e.g. zero-volume candles missing on XT).
     tail = out["timestamp"].iloc[-MIN_CANDLES:]
     if len(tail) > 1:
         gaps = tail.diff().dropna().dt.total_seconds() / 60.0
         if (gaps > tf_minutes * 3.5).any():
             raise ValueError(f"Major gap in {tf_minutes}m candles")
+
+    # Fill tolerated gaps (flat candle at previous close, zero volume) so FVG patterns and
+    # swing windows never span a hole. Only when all timestamps sit on the timeframe grid.
+    freq = f"{tf_minutes}min"
+    on_grid = out["timestamp"].dt.floor(freq).eq(out["timestamp"]).all()
+    if on_grid and len(out) > 1:
+        full = pd.date_range(out["timestamp"].iloc[0], out["timestamp"].iloc[-1], freq=freq)
+        if len(full) != len(out):
+            out = out.set_index("timestamp").reindex(full)
+            out["close"] = out["close"].ffill()
+            for c in ("open", "high", "low"):
+                out[c] = out[c].fillna(out["close"])
+            out["volume"] = out["volume"].fillna(0.0)
+            out = out.rename_axis("timestamp").reset_index()
     return out[["timestamp"] + required]
 
 
 def drop_unclosed(df: pd.DataFrame, tf_minutes: int, now=None) -> pd.DataFrame:
+    """Removes the last candle if it is still forming."""
     now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
     if now.tzinfo is None:
         now = now.tz_localize("UTC")
@@ -93,6 +117,9 @@ def drop_unclosed(df: pd.DataFrame, tf_minutes: int, now=None) -> pd.DataFrame:
     return df
 
 
+# --------------------------------------------------------------------------
+# Indicators
+# --------------------------------------------------------------------------
 def _true_range(df: pd.DataFrame) -> pd.Series:
     prev_close = df["close"].shift(1)
     return pd.concat([
@@ -122,6 +149,9 @@ def calculate_directional_adx(df: pd.DataFrame, period: int = ADX_PERIOD):
     return adx, plus_di, minus_di
 
 
+# --------------------------------------------------------------------------
+# Structure
+# --------------------------------------------------------------------------
 def identify_swings(df: pd.DataFrame, lookback: int = SWING_LOOKBACK):
     window = 2 * lookback + 1
     rmax = df["high"].rolling(window=window, center=True).max()
@@ -135,6 +165,12 @@ def identify_swings(df: pd.DataFrame, lookback: int = SWING_LOOKBACK):
 
 
 def detect_market_structure(df: pd.DataFrame) -> dict:
+    """
+    Fresh break of the last swing (closed candles only).
+    BOS   = break in the direction of the prior structure (higher low / lower high)
+    CHOCH = break against it.
+    The structure stays valid until the impulse origin (leg start) is lost.
+    """
     swing_highs, swing_lows = identify_swings(df)
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return {"type": "RANGE", "direction": None}
@@ -180,13 +216,23 @@ def detect_market_structure(df: pd.DataFrame) -> dict:
 
 
 def detect_unmitigated_fvgs(df: pd.DataFrame, side: str) -> list:
+    """
+    FVGs on closed 15m candles, sized by ATR, not mitigated (no later candle reached
+    the 50% level / closed through it), and price must have left the gap by >= MIN_MOVE_AWAY_ATR.
+    The last candle (n-1) is the candidate tap candle and is excluded from mitigation checks.
+    """
     n = len(df)
     highs, lows, closes = df["high"].values, df["low"].values, df["close"].values
+    vols = df["volume"].values
     atrs = df["atr"].values
     ts = df["timestamp"]
     out = []
 
     for i in range(max(2, n - MAX_FVG_AGE_CANDLES), n - 2):
+        # none of the 3 FVG candles may be a synthetic (padded) zero-volume candle
+        if vols[i] <= 0 or vols[i - 1] <= 0 or vols[i - 2] <= 0:
+            continue
+
         atr_i = atrs[i]
         if not np.isfinite(atr_i) or atr_i <= 0:
             continue
@@ -229,6 +275,9 @@ def detect_unmitigated_fvgs(df: pd.DataFrame, side: str) -> list:
     return out
 
 
+# --------------------------------------------------------------------------
+# Signal
+# --------------------------------------------------------------------------
 def hold(code: str, reason: str, **extra) -> dict:
     res = {
         "signal": "HOLD", "side": "HOLD", "code": code, "confidence": 0,
@@ -239,6 +288,7 @@ def hold(code: str, reason: str, **extra) -> dict:
 
 
 def _evaluate_side(side: str, c: dict):
+    """Returns (result | None, stage, code, reason). A higher stage means the setup got further."""
     is_long = side == "LONG"
     s = c["struct"]
 
@@ -290,6 +340,7 @@ def _evaluate_side(side: str, c: dict):
             risk = MIN_STOP_ATR * atr
             stop = price - risk if is_long else price + risk
 
+        # Net RR: costs are added to both the risk and the required reward
         cost = price * ROUND_TRIP_COST_PCT
         reward = RR_RATIO * (risk + cost) + cost
         target = price + reward if is_long else price - reward
@@ -313,7 +364,7 @@ def _evaluate_side(side: str, c: dict):
             "stop": stop, "stop_loss": stop, "target": target, "take_profit": target,
             "risk_dist": risk, "cost_pct": ROUND_TRIP_COST_PCT,
             "zone_id": fvg["zone_id"],
-            "confidence": min(conf, 95),
+            "confidence": min(conf, 95),   # heuristic score, NOT a win probability
             "reason": f"روند {word} ({s['type']}) + پولبک به FVG دست‌نخورده داخل لگ شکست",
         }, 7, f"SIGNAL_{side}", ""
 
@@ -334,6 +385,7 @@ def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_clos
         if min(len(d15), len(d1), len(d4)) < MIN_CANDLES:
             return hold("HOLD_INSUFFICIENT_DATA", "تعداد کندل کافی نیست", symbol=symbol)
 
+        # all three frames must end at (almost) the same moment
         t15_end = d15["timestamp"].iloc[-1] + pd.Timedelta(minutes=15)
         for df_x, tf in ((d1, 60), (d4, 240)):
             end_x = df_x["timestamp"].iloc[-1] + pd.Timedelta(minutes=tf)
@@ -410,7 +462,12 @@ def generate_signal(df_15m, df_1h, df_4h, symbol=None, now=None, only_closed=Tru
     return analyze_market(df_15m, df_1h, df_4h, symbol, now=now, only_closed=only_closed)
 
 
+# --------------------------------------------------------------------------
+# Duplicate-signal guard (use it in the bot, right before sending)
+# --------------------------------------------------------------------------
 class SignalGuard:
+    """Blocks repeated signals: same FVG zone, or same symbol+side inside the cooldown."""
+
     def __init__(self, cooldown_minutes: int = 60, path: str = None):
         self.cooldown = pd.Timedelta(minutes=cooldown_minutes)
         self.path = path
