@@ -5,7 +5,13 @@ import ccxt
 import pandas as pd
 import numpy as np
 
-from strategy import analyze_market, SignalGuard, MIN_CANDLES
+from strategy import (
+    analyze_market,
+    SignalGuard,
+    MIN_CANDLES,
+    calculate_directional_adx,
+    validate_data,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
@@ -57,7 +63,7 @@ def fetch_historical_ohlcv(symbol: str, timeframe: str, since_ms: int) -> pd.Dat
             if last_ts <= current_since:
                 break
             current_since = last_ts + tf_ms
-            time.sleep(0.25)
+            time.sleep(0.2)
         except Exception as e:
             logging.warning("Fetch retry for %s (%s): %s", symbol, timeframe, e)
             time.sleep(1.5)
@@ -73,7 +79,6 @@ def fetch_historical_ohlcv(symbol: str, timeframe: str, since_ms: int) -> pd.Dat
 
 def run_backtest():
     now_utc = datetime.now(timezone.utc)
-    # Add extra 35 days warmup for 4H EMA50 and ADX indicators before the 90-day test window
     warmup_start = now_utc - timedelta(days=DAYS_BACK + 35)
     test_start = pd.Timestamp(now_utc - timedelta(days=DAYS_BACK))
     since_ms = int(warmup_start.timestamp() * 1000)
@@ -85,8 +90,22 @@ def run_backtest():
         df15 = fetch_historical_ohlcv(sym, "15m", since_ms)
         df1 = fetch_historical_ohlcv(sym, "1h", since_ms)
         df4 = fetch_historical_ohlcv(sym, "4h", since_ms)
-        if len(df15) > MIN_CANDLES and len(df1) > MIN_CANDLES and len(df4) > MIN_CANDLES:
-            data_store[sym] = {"15m": df15, "1h": df1, "4h": df4}
+
+        if min(len(df15), len(df1), len(df4)) > MIN_CANDLES:
+            d1_clean = validate_data(df1, 60)
+            adx_s, _, _ = calculate_directional_adx(d1_clean)
+            d1_clean["fast_adx"] = adx_s
+            active_1h_hours = set(d1_clean.loc[d1_clean["fast_adx"] >= 20.0, "timestamp"])
+
+            data_store[sym] = {
+                "15m": df15,
+                "1h": df1,
+                "4h": df4,
+                "active_1h": active_1h_hours,
+                "ts_15m": df15["timestamp"].values,
+                "ts_1h": df1["timestamp"].values,
+                "ts_4h": df4["timestamp"].values,
+            }
         else:
             logging.warning("Insufficient historical data for %s, skipping.", sym)
 
@@ -94,7 +113,6 @@ def run_backtest():
         logging.error("No data fetched. Aborting backtest.")
         return
 
-    # Build unified 15m timeline for the 90-day test window
     all_timestamps = sorted(set(
         ts for sym_data in data_store.values()
         for ts in sym_data["15m"]["timestamp"]
@@ -108,20 +126,26 @@ def run_backtest():
     closed_trades = []
     guard = SignalGuard(cooldown_minutes=COOLDOWN_MINUTES, path=None)
 
-    logging.info("Simulating %d 15m steps across %d symbols...", len(all_timestamps), len(data_store))
+    total_steps = len(all_timestamps)
+    logging.info("Simulating %d 15m steps across %d symbols...", total_steps, len(data_store))
 
-    for candle_open_ts in all_timestamps:
-        # Moment right after this 15m candle closes
+    for step_idx, candle_open_ts in enumerate(all_timestamps, 1):
+        if step_idx % 2000 == 0 or step_idx == total_steps:
+            logging.info("Progress: %d / %d steps (%.1f%%) | Balance: $%.2f",
+                         step_idx, total_steps, (step_idx / total_steps) * 100, balance)
+
         sim_now = candle_open_ts + pd.Timedelta(minutes=15)
+        sim_now_np = np.datetime64(sim_now.tz_convert(None))
+        candle_open_np = np.datetime64(candle_open_ts.tz_convert(None))
 
-        # 1. Manage existing open positions using the closed 15m candle's High/Low/Close
+        # 1. Manage existing open positions
         for sym in list(open_positions.keys()):
-            df15 = data_store[sym]["15m"]
-            row_df = df15[df15["timestamp"] == candle_open_ts]
-            if row_df.empty:
+            sym_data = data_store[sym]
+            idx15 = np.searchsorted(sym_data["ts_15m"], candle_open_np)
+            if idx15 >= len(sym_data["15m"]) or sym_data["ts_15m"][idx15] != candle_open_np:
                 continue
 
-            bar = row_df.iloc[0]
+            bar = sym_data["15m"].iloc[idx15]
             high = float(bar["high"])
             low = float(bar["low"])
             pos = open_positions[sym]
@@ -133,7 +157,6 @@ def run_backtest():
             qty = pos["quantity"]
 
             if side == "LONG":
-                # Conservative assumption: check SL before TP if both touched in the same 15m bar
                 if low <= sl:
                     exit_price = sl * (1 - SLIPPAGE_RATE)
                     gross = (exit_price - entry) * qty
@@ -203,15 +226,16 @@ def run_backtest():
                     closed_trades.append({"symbol": sym, "side": side, "pnl": net, "reason": "TAKE_PROFIT_2", "time": str(sim_now)})
                     del open_positions[sym]
 
-        # Update Max Drawdown
         if balance > peak_balance:
             peak_balance = balance
         dd = ((peak_balance - balance) / peak_balance) * 100 if peak_balance > 0 else 0
         max_drawdown_pct = max(max_drawdown_pct, dd)
 
-        # 2. Scan for new entries if slots available
+        # 2. Scan for new entries
         if len(open_positions) >= MAX_OPEN_POSITIONS:
             continue
+
+        last_closed_1h_ts = sim_now.floor("1h") - pd.Timedelta(hours=1)
 
         for sym, sym_data in data_store.items():
             if len(open_positions) >= MAX_OPEN_POSITIONS:
@@ -219,13 +243,19 @@ def run_backtest():
             if sym in open_positions:
                 continue
 
-            # Slice strictly available candles up to sim_now (Zero lookahead bias)
-            d15_slice = sym_data["15m"][sym_data["15m"]["timestamp"] <= candle_open_ts].tail(260)
-            d1_slice = sym_data["1h"][sym_data["1h"]["timestamp"] < sim_now].tail(260)
-            d4_slice = sym_data["4h"][sym_data["4h"]["timestamp"] < sim_now].tail(260)
-
-            if min(len(d15_slice), len(d1_slice), len(d4_slice)) < MIN_CANDLES:
+            if last_closed_1h_ts not in sym_data["active_1h"]:
                 continue
+
+            end15 = np.searchsorted(sym_data["ts_15m"], candle_open_np, side="right")
+            end1 = np.searchsorted(sym_data["ts_1h"], sim_now_np, side="left")
+            end4 = np.searchsorted(sym_data["ts_4h"], sim_now_np, side="left")
+
+            if min(end15, end1, end4) < MIN_CANDLES:
+                continue
+
+            d15_slice = sym_data["15m"].iloc[max(0, end15 - 220):end15]
+            d1_slice = sym_data["1h"].iloc[max(0, end1 - 220):end1]
+            d4_slice = sym_data["4h"].iloc[max(0, end4 - 220):end4]
 
             sig = analyze_market(d15_slice, d1_slice, d4_slice, symbol=sym, now=sim_now, only_closed=True)
             if sig.get("signal") in ("LONG", "SHORT") and guard.allow(sig):
