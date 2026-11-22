@@ -6,48 +6,96 @@ import pandas as pd
 import numpy as np
 
 from strategy import (
-    analyze_market,
+    validate_data,
+    drop_unclosed,
+    calculate_atr,
+    calculate_directional_adx,
+    detect_market_structure,
+    detect_unmitigated_fvgs,
     SignalGuard,
     MIN_CANDLES,
-    calculate_directional_adx,
-    validate_data,
+    STOP_BUFFER_ATR,
+    MIN_STOP_ATR,
+    MAX_STOP_ATR,
+    ROUND_TRIP_COST_PCT,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# ==================== BACKTEST CONFIGURATION ====================
-DAYS_BACK = 90                  # 3 months historical data
+DAYS_BACK = 90
 INITIAL_BALANCE = 100.0
 LEVERAGE = 20
-RISK_PER_TRADE = 0.015          # 1.5% max risk per trade
+RISK_PER_TRADE = 0.015
 MAX_OPEN_POSITIONS = 2
 MAX_SAME_SIDE_POSITIONS = 2
-MIN_SL_PCT = 0.004              # 0.4% minimum SL distance
+MIN_SL_PCT = 0.004
 COOLDOWN_MINUTES = 60
-FEE_RATE = 0.0005               # 0.05% taker fee per side
-SLIPPAGE_RATE = 0.0002          # 0.02% slippage per side
+FEE_RATE = 0.0005
+SLIPPAGE_RATE = 0.0002
 
-SYMBOLS = [
-    "BTC/USDT:USDT",
-    "ETH/USDT:USDT",
-    "SOL/USDT:USDT",
-    "BNB/USDT:USDT",
-    "XRP/USDT:USDT",
-    "DOGE/USDT:USDT",
-    "ADA/USDT:USDT",
-    "AVAX/USDT:USDT",
-    "LINK/USDT:USDT",
-    "LTC/USDT:USDT"
+ALL_SYMBOLS = [
+    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
+    "DOGE/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT", "LTC/USDT:USDT"
+]
+MAJORS_ONLY = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT", "LINK/USDT:USDT"]
+
+EXPERIMENTS = [
+    {
+        "name": "0. Baseline (v4.2)",
+        "symbols": ALL_SYMBOLS,
+        "use_partial_tp1": True,
+        "be_trigger_r": None,
+        "rr_ratio": 2.0,
+        "bos_only": False,
+        "max_adx": 999.0,
+        "require_rejection": True,
+    },
+    {
+        "name": "A. Full Exit (No TP1, BE @ 1.2R)",
+        "symbols": ALL_SYMBOLS,
+        "use_partial_tp1": False,
+        "be_trigger_r": 1.2,
+        "rr_ratio": 2.0,
+        "bos_only": False,
+        "max_adx": 999.0,
+        "require_rejection": True,
+    },
+    {
+        "name": "B. BOS Only + ADX<=42 + Majors",
+        "symbols": MAJORS_ONLY,
+        "use_partial_tp1": True,
+        "be_trigger_r": None,
+        "rr_ratio": 2.0,
+        "bos_only": True,
+        "max_adx": 42.0,
+        "require_rejection": True,
+    },
+    {
+        "name": "C. Early FVG Tap (No Rejection Wait)",
+        "symbols": ALL_SYMBOLS,
+        "use_partial_tp1": True,
+        "be_trigger_r": None,
+        "rr_ratio": 2.0,
+        "bos_only": False,
+        "max_adx": 999.0,
+        "require_rejection": False,
+    },
+    {
+        "name": "ABC. Combined Optimal",
+        "symbols": MAJORS_ONLY,
+        "use_partial_tp1": False,
+        "be_trigger_r": 1.2,
+        "rr_ratio": 2.2,
+        "bos_only": True,
+        "max_adx": 42.0,
+        "require_rejection": False,
+    },
 ]
 
-exchange = ccxt.xt({
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap"}
-})
+exchange = ccxt.xt({"enableRateLimit": True, "options": {"defaultType": "swap"}})
 
 
 def fetch_historical_ohlcv(symbol: str, timeframe: str, since_ms: int) -> pd.DataFrame:
-    """Fetches paginated historical candles from XT exchange."""
     all_rows = []
     current_since = since_ms
     tf_ms = exchange.parse_timeframe(timeframe) * 1000
@@ -64,12 +112,8 @@ def fetch_historical_ohlcv(symbol: str, timeframe: str, since_ms: int) -> pd.Dat
                 break
             current_since = last_ts + tf_ms
             time.sleep(0.2)
-        except Exception as e:
-            logging.warning("Fetch retry for %s (%s): %s", symbol, timeframe, e)
+        except Exception:
             time.sleep(1.5)
-
-    if not all_rows:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     df = pd.DataFrame(all_rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
@@ -77,68 +121,125 @@ def fetch_historical_ohlcv(symbol: str, timeframe: str, since_ms: int) -> pd.Dat
     return df
 
 
-def run_backtest():
-    now_utc = datetime.now(timezone.utc)
-    warmup_start = now_utc - timedelta(days=DAYS_BACK + 35)
-    test_start = pd.Timestamp(now_utc - timedelta(days=DAYS_BACK))
-    since_ms = int(warmup_start.timestamp() * 1000)
-
-    logging.info("Downloading 3-month (+warmup) historical data for %d symbols from XT...", len(SYMBOLS))
-    data_store = {}
-    for sym in SYMBOLS:
-        logging.info("Fetching %s...", sym)
-        df15 = fetch_historical_ohlcv(sym, "15m", since_ms)
-        df1 = fetch_historical_ohlcv(sym, "1h", since_ms)
-        df4 = fetch_historical_ohlcv(sym, "4h", since_ms)
-
-        if min(len(df15), len(df1), len(df4)) > MIN_CANDLES:
-            d1_clean = validate_data(df1, 60)
-            adx_s, _, _ = calculate_directional_adx(d1_clean)
-            d1_clean["fast_adx"] = adx_s
-            active_1h_hours = set(d1_clean.loc[d1_clean["fast_adx"] >= 20.0, "timestamp"])
-
-            data_store[sym] = {
-                "15m": df15,
-                "1h": df1,
-                "4h": df4,
-                "active_1h": active_1h_hours,
-                "ts_15m": df15["timestamp"].values,
-                "ts_1h": df1["timestamp"].values,
-                "ts_4h": df4["timestamp"].values,
-            }
-        else:
-            logging.warning("Insufficient historical data for %s, skipping.", sym)
-
-    if not data_store:
-        logging.error("No data fetched. Aborting backtest.")
-        return
-
-    all_timestamps = sorted(set(
-        ts for sym_data in data_store.values()
-        for ts in sym_data["15m"]["timestamp"]
-        if ts >= test_start
-    ))
-
-    balance = INITIAL_BALANCE
-    peak_balance = INITIAL_BALANCE
-    max_drawdown_pct = 0.0
-    open_positions = {}
-    closed_trades = []
-    guard = SignalGuard(cooldown_minutes=COOLDOWN_MINUTES, path=None)
-
-    total_steps = len(all_timestamps)
-    logging.info("Simulating %d 15m steps across %d symbols...", total_steps, len(data_store))
-
-    for step_idx, candle_open_ts in enumerate(all_timestamps, 1):
-        if step_idx % 2000 == 0 or step_idx == total_steps:
-            logging.info("Progress: %d / %d steps (%.1f%%) | Balance: $%.2f",
-                         step_idx, total_steps, (step_idx / total_steps) * 100, balance)
-
+def precompute_signals(data_store: dict, all_timestamps: list, test_start: pd.Timestamp):
+    raw_candidates = {}
+    for candle_open_ts in all_timestamps:
+        if candle_open_ts < test_start:
+            continue
         sim_now = candle_open_ts + pd.Timedelta(minutes=15)
         sim_now_np = np.datetime64(sim_now.tz_convert(None))
         candle_open_np = np.datetime64(candle_open_ts.tz_convert(None))
+        last_closed_1h_ts = sim_now.floor("1h") - pd.Timedelta(hours=1)
 
-        # 1. Manage existing open positions
+        step_signals = []
+        for sym, sym_data in data_store.items():
+            if last_closed_1h_ts not in sym_data["active_1h"]:
+                continue
+
+            end15 = np.searchsorted(sym_data["ts_15m"], candle_open_np, side="right")
+            end1 = np.searchsorted(sym_data["ts_1h"], sim_now_np, side="left")
+            end4 = np.searchsorted(sym_data["ts_4h"], sim_now_np, side="left")
+            if min(end15, end1, end4) < MIN_CANDLES:
+                continue
+
+            d15 = validate_data(sym_data["15m"].iloc[max(0, end15 - 220):end15], 15)
+            d1 = validate_data(sym_data["1h"].iloc[max(0, end1 - 220):end1], 60)
+            d4 = validate_data(sym_data["4h"].iloc[max(0, end4 - 220):end4], 240)
+
+            d15 = drop_unclosed(d15, 15, sim_now)
+            d1 = drop_unclosed(d1, 60, sim_now)
+            d4 = drop_unclosed(d4, 240, sim_now)
+            if min(len(d15), len(d1), len(d4)) < MIN_CANDLES:
+                continue
+
+            d15["atr"] = calculate_atr(d15)
+            atr = float(d15["atr"].iloc[-1])
+            if not np.isfinite(atr) or atr <= 0:
+                continue
+
+            adx_s, pdi_s, mdi_s = calculate_directional_adx(d1)
+            adx_1h, plus_di, minus_di = float(adx_s.iloc[-1]), float(pdi_s.iloc[-1]), float(mdi_s.iloc[-1])
+            if adx_1h < 22.0:
+                continue
+
+            struct = detect_market_structure(d1)
+            if struct["type"] == "RANGE":
+                continue
+
+            ema20_s = d4["close"].ewm(span=20, adjust=False).mean()
+            ema50_s = d4["close"].ewm(span=50, adjust=False).mean()
+            ema20, ema20_prev = float(ema20_s.iloc[-1]), float(ema20_s.iloc[-4])
+            ema50 = float(ema50_s.iloc[-1])
+            d4_close = float(d4["close"].iloc[-1])
+            d4_bull = d4_close > ema20 > ema50 and ema20 > ema20_prev
+            d4_bear = d4_close < ema20 < ema50 and ema20 < ema20_prev
+
+            side = struct["direction"]
+            if side == "LONG" and not (d4_bull and plus_di > minus_di):
+                continue
+            if side == "SHORT" and not (d4_bear and minus_di > plus_di):
+                continue
+
+            fvgs = detect_unmitigated_fvgs(d15, side)
+            leg_start_ts = d1["timestamp"].iloc[struct["leg_start_idx"]]
+            leg_end_ts = d1["timestamp"].iloc[struct["break_idx"]] + pd.Timedelta(minutes=60)
+            linked = [f for f in fvgs if leg_start_ts <= f["mid_ts"] <= leg_end_ts]
+            if not linked:
+                continue
+
+            price = float(d15["close"].iloc[-1])
+            op = float(d15["open"].iloc[-1])
+            low = float(d15["low"].iloc[-1])
+            high = float(d15["high"].iloc[-1])
+
+            for fvg in reversed(linked):
+                if side == "LONG":
+                    tapped = low <= fvg["top"] and price >= fvg["bottom"]
+                    rejection = price > op and price > fvg["mid"]
+                    stop = fvg["bottom"] - STOP_BUFFER_ATR * atr
+                    risk = price - stop
+                else:
+                    tapped = high >= fvg["bottom"] and price <= fvg["top"]
+                    rejection = price < op and price < fvg["mid"]
+                    stop = fvg["top"] + STOP_BUFFER_ATR * atr
+                    risk = stop - price
+
+                if not tapped or risk > MAX_STOP_ATR * atr:
+                    continue
+                if risk < MIN_STOP_ATR * atr:
+                    risk = MIN_STOP_ATR * atr
+                    stop = price - risk if side == "LONG" else price + risk
+
+                step_signals.append({
+                    "symbol": sym,
+                    "side": side,
+                    "structure_type": struct["type"],
+                    "adx_1h": adx_1h,
+                    "rejection": rejection,
+                    "entry_price": price,
+                    "stop_loss": stop,
+                    "risk_dist": risk,
+                    "zone_id": fvg["zone_id"],
+                    "candle_time": d15["timestamp"].iloc[-1].isoformat(),
+                })
+                break
+
+        raw_candidates[candle_open_ts] = step_signals
+    return raw_candidates
+
+
+def simulate_experiment(exp: dict, data_store: dict, all_timestamps: list, raw_candidates: dict) -> dict:
+    balance = INITIAL_BALANCE
+    peak_balance = INITIAL_BALANCE
+    max_dd = 0.0
+    open_positions = {}
+    closed_trades = []
+    guard = SignalGuard(cooldown_minutes=COOLDOWN_MINUTES, path=None)
+    allowed_syms = set(exp["symbols"])
+
+    for candle_open_ts in all_timestamps:
+        candle_open_np = np.datetime64(candle_open_ts.tz_convert(None))
+
         for sym in list(open_positions.keys()):
             sym_data = data_store[sym]
             idx15 = np.searchsorted(sym_data["ts_15m"], candle_open_np)
@@ -146,195 +247,203 @@ def run_backtest():
                 continue
 
             bar = sym_data["15m"].iloc[idx15]
-            high = float(bar["high"])
-            low = float(bar["low"])
+            high, low = float(bar["high"]), float(bar["low"])
             pos = open_positions[sym]
-            side = pos["side"]
-            entry = pos["entry"]
-            sl = pos["stop_loss"]
-            tp1 = pos["tp1"]
-            tp2 = pos["take_profit"]
-            qty = pos["quantity"]
+            side, entry, sl, tp1, tp2, qty = (
+                pos["side"], pos["entry"], pos["stop_loss"], pos["tp1"], pos["take_profit"], pos["quantity"]
+            )
 
             if side == "LONG":
                 if low <= sl:
-                    exit_price = sl * (1 - SLIPPAGE_RATE)
-                    gross = (exit_price - entry) * qty
-                    fee = (exit_price * qty) * FEE_RATE
-                    net = gross - fee
+                    exit_p = sl * (1 - SLIPPAGE_RATE)
+                    net = (exit_p - entry) * qty - (exit_p * qty * FEE_RATE)
                     balance += net
-                    reason = "BREAKEVEN" if pos["is_breakeven"] and net >= 0 else "STOP_LOSS"
-                    closed_trades.append({"symbol": sym, "side": side, "pnl": net, "reason": reason, "time": str(sim_now)})
+                    closed_trades.append({"side": side, "pnl": net})
                     del open_positions[sym]
                     continue
 
-                if not pos["is_tp1_hit"] and high >= tp1:
-                    close_qty = qty / 2.0
-                    exit_price = tp1 * (1 - SLIPPAGE_RATE)
-                    gross = (exit_price - entry) * close_qty
-                    fee = (exit_price * close_qty) * FEE_RATE
-                    net = gross - fee
+                if exp["use_partial_tp1"] and not pos["is_tp1_hit"] and high >= tp1:
+                    c_qty = qty / 2.0
+                    exit_p = tp1 * (1 - SLIPPAGE_RATE)
+                    net = (exit_p - entry) * c_qty - (exit_p * c_qty * FEE_RATE)
                     balance += net
-                    pos["quantity"] = close_qty
+                    pos["quantity"] = c_qty
                     pos["stop_loss"] = entry * (1 + (FEE_RATE + SLIPPAGE_RATE) * 2)
                     pos["is_tp1_hit"] = True
-                    pos["is_breakeven"] = True
-                    closed_trades.append({"symbol": sym, "side": side, "pnl": net, "reason": "PARTIAL_TP1", "time": str(sim_now)})
-                    qty = close_qty
+                    closed_trades.append({"side": side, "pnl": net})
+                    qty = c_qty
+                elif not exp["use_partial_tp1"] and exp["be_trigger_r"] and not pos["is_be"]:
+                    if high >= entry + pos["risk_dist"] * exp["be_trigger_r"]:
+                        pos["stop_loss"] = entry * (1 + (FEE_RATE + SLIPPAGE_RATE) * 2)
+                        pos["is_be"] = True
 
                 if high >= tp2:
-                    exit_price = tp2 * (1 - SLIPPAGE_RATE)
-                    gross = (exit_price - entry) * qty
-                    fee = (exit_price * qty) * FEE_RATE
-                    net = gross - fee
+                    exit_p = tp2 * (1 - SLIPPAGE_RATE)
+                    net = (exit_p - entry) * qty - (exit_p * qty * FEE_RATE)
                     balance += net
-                    closed_trades.append({"symbol": sym, "side": side, "pnl": net, "reason": "TAKE_PROFIT_2", "time": str(sim_now)})
+                    closed_trades.append({"side": side, "pnl": net})
                     del open_positions[sym]
 
-            else:  # SHORT
+            else:
                 if high >= sl:
-                    exit_price = sl * (1 + SLIPPAGE_RATE)
-                    gross = (entry - exit_price) * qty
-                    fee = (exit_price * qty) * FEE_RATE
-                    net = gross - fee
+                    exit_p = sl * (1 + SLIPPAGE_RATE)
+                    net = (entry - exit_p) * qty - (exit_p * qty * FEE_RATE)
                     balance += net
-                    reason = "BREAKEVEN" if pos["is_breakeven"] and net >= 0 else "STOP_LOSS"
-                    closed_trades.append({"symbol": sym, "side": side, "pnl": net, "reason": reason, "time": str(sim_now)})
+                    closed_trades.append({"side": side, "pnl": net})
                     del open_positions[sym]
                     continue
 
-                if not pos["is_tp1_hit"] and low <= tp1:
-                    close_qty = qty / 2.0
-                    exit_price = tp1 * (1 + SLIPPAGE_RATE)
-                    gross = (entry - exit_price) * close_qty
-                    fee = (exit_price * close_qty) * FEE_RATE
-                    net = gross - fee
+                if exp["use_partial_tp1"] and not pos["is_tp1_hit"] and low <= tp1:
+                    c_qty = qty / 2.0
+                    exit_p = tp1 * (1 + SLIPPAGE_RATE)
+                    net = (entry - exit_p) * c_qty - (exit_p * c_qty * FEE_RATE)
                     balance += net
-                    pos["quantity"] = close_qty
+                    pos["quantity"] = c_qty
                     pos["stop_loss"] = entry * (1 - (FEE_RATE + SLIPPAGE_RATE) * 2)
                     pos["is_tp1_hit"] = True
-                    pos["is_breakeven"] = True
-                    closed_trades.append({"symbol": sym, "side": side, "pnl": net, "reason": "PARTIAL_TP1", "time": str(sim_now)})
-                    qty = close_qty
+                    closed_trades.append({"side": side, "pnl": net})
+                    qty = c_qty
+                elif not exp["use_partial_tp1"] and exp["be_trigger_r"] and not pos["is_be"]:
+                    if low <= entry - pos["risk_dist"] * exp["be_trigger_r"]:
+                        pos["stop_loss"] = entry * (1 - (FEE_RATE + SLIPPAGE_RATE) * 2)
+                        pos["is_be"] = True
 
                 if low <= tp2:
-                    exit_price = tp2 * (1 + SLIPPAGE_RATE)
-                    gross = (entry - exit_price) * qty
-                    fee = (exit_price * qty) * FEE_RATE
-                    net = gross - fee
+                    exit_p = tp2 * (1 + SLIPPAGE_RATE)
+                    net = (entry - exit_p) * qty - (exit_p * qty * FEE_RATE)
                     balance += net
-                    closed_trades.append({"symbol": sym, "side": side, "pnl": net, "reason": "TAKE_PROFIT_2", "time": str(sim_now)})
+                    closed_trades.append({"side": side, "pnl": net})
                     del open_positions[sym]
 
         if balance > peak_balance:
             peak_balance = balance
         dd = ((peak_balance - balance) / peak_balance) * 100 if peak_balance > 0 else 0
-        max_drawdown_pct = max(max_drawdown_pct, dd)
+        max_dd = max(max_dd, dd)
 
-        # 2. Scan for new entries
         if len(open_positions) >= MAX_OPEN_POSITIONS:
             continue
 
-        last_closed_1h_ts = sim_now.floor("1h") - pd.Timedelta(hours=1)
-
-        for sym, sym_data in data_store.items():
+        for cand in raw_candidates.get(candle_open_ts, []):
             if len(open_positions) >= MAX_OPEN_POSITIONS:
                 break
-            if sym in open_positions:
+            sym = cand["symbol"]
+            if sym not in allowed_syms or sym in open_positions:
+                continue
+            if exp["bos_only"] and "BOS" not in cand["structure_type"]:
+                continue
+            if cand["adx_1h"] > exp["max_adx"]:
+                continue
+            if exp["require_rejection"] and not cand["rejection"]:
                 continue
 
-            if last_closed_1h_ts not in sym_data["active_1h"]:
+            sig_stub = {"signal": cand["side"], "side": cand["side"], "symbol": sym,
+                        "candle_time": cand["candle_time"], "zone_id": cand["zone_id"]}
+            if not guard.allow(sig_stub):
                 continue
 
-            end15 = np.searchsorted(sym_data["ts_15m"], candle_open_np, side="right")
-            end1 = np.searchsorted(sym_data["ts_1h"], sim_now_np, side="left")
-            end4 = np.searchsorted(sym_data["ts_4h"], sim_now_np, side="left")
-
-            if min(end15, end1, end4) < MIN_CANDLES:
+            side = cand["side"]
+            if sum(1 for p in open_positions.values() if p["side"] == side) >= MAX_SAME_SIDE_POSITIONS:
                 continue
 
-            d15_slice = sym_data["15m"].iloc[max(0, end15 - 220):end15]
-            d1_slice = sym_data["1h"].iloc[max(0, end1 - 220):end1]
-            d4_slice = sym_data["4h"].iloc[max(0, end4 - 220):end4]
+            raw_entry = cand["entry_price"]
+            entry = raw_entry * (1 + SLIPPAGE_RATE) if side == "LONG" else raw_entry * (1 - SLIPPAGE_RATE)
+            stop = cand["stop_loss"]
+            min_sl = entry * MIN_SL_PCT
+            price_risk = max(abs(entry - stop), min_sl)
+            stop = entry - price_risk if side == "LONG" else entry + price_risk
 
-            sig = analyze_market(d15_slice, d1_slice, d4_slice, symbol=sym, now=sim_now, only_closed=True)
-            if sig.get("signal") in ("LONG", "SHORT") and guard.allow(sig):
-                side = sig["signal"]
-                same_side = sum(1 for p in open_positions.values() if p["side"] == side)
-                if same_side >= MAX_SAME_SIDE_POSITIONS:
-                    continue
+            cost = entry * ROUND_TRIP_COST_PCT
+            reward = exp["rr_ratio"] * (price_risk + cost) + cost
+            target = entry + reward if side == "LONG" else entry - reward
 
-                raw_entry = float(sig["entry_price"])
-                entry = raw_entry * (1 + SLIPPAGE_RATE) if side == "LONG" else raw_entry * (1 - SLIPPAGE_RATE)
-                stop = float(sig["stop_loss"])
-                target = float(sig["take_profit"])
+            risk_amount = balance * RISK_PER_TRADE
+            qty = risk_amount / (price_risk + cost)
+            notional = qty * entry
+            margin = notional / LEVERAGE
+            entry_fee = notional * FEE_RATE
+            used_margin = sum(p["margin"] for p in open_positions.values())
 
-                min_sl_dist = entry * MIN_SL_PCT
-                raw_risk = abs(entry - stop)
-                if raw_risk == 0:
-                    continue
-                if raw_risk < min_sl_dist:
-                    stop = entry - min_sl_dist if side == "LONG" else entry + min_sl_dist
-                    price_risk = min_sl_dist
-                else:
-                    price_risk = raw_risk
+            if margin + entry_fee > (balance - used_margin) * 0.9:
+                continue
 
-                risk_amount = balance * RISK_PER_TRADE
-                eff_risk = price_risk + (entry * (FEE_RATE + SLIPPAGE_RATE) * 2)
-                qty = risk_amount / eff_risk
+            balance -= entry_fee
+            open_positions[sym] = {
+                "side": side, "entry": entry, "quantity": qty, "stop_loss": stop,
+                "take_profit": target, "tp1": entry + (target - entry) * 0.5,
+                "risk_dist": price_risk, "margin": margin, "is_tp1_hit": False, "is_be": False,
+            }
 
-                notional = qty * entry
-                margin = notional / LEVERAGE
-                entry_fee = notional * FEE_RATE
-                used_margin = sum(p["margin"] for p in open_positions.values())
-
-                if margin + entry_fee > (balance - used_margin) * 0.9:
-                    continue
-
-                balance -= entry_fee
-                tp1 = entry + (target - entry) * 0.5
-
-                open_positions[sym] = {
-                    "side": side,
-                    "entry": entry,
-                    "quantity": qty,
-                    "stop_loss": stop,
-                    "take_profit": target,
-                    "tp1": tp1,
-                    "margin": margin,
-                    "is_tp1_hit": False,
-                    "is_breakeven": False
-                }
-
-    # ==================== PRINT SUMMARY REPORT ====================
     wins = [t for t in closed_trades if t["pnl"] > 0]
     losses = [t for t in closed_trades if t["pnl"] < 0]
-    long_trades = [t for t in closed_trades if t["side"] == "LONG"]
-    short_trades = [t for t in closed_trades if t["side"] == "SHORT"]
+    longs = [t for t in closed_trades if t["side"] == "LONG"]
+    shorts = [t for t in closed_trades if t["side"] == "SHORT"]
+    gross_w = sum(t["pnl"] for t in wins)
+    gross_l = abs(sum(t["pnl"] for t in losses))
+    pf = (gross_w / gross_l) if gross_l > 0 else 0.0
+    wr = (len(wins) / len(closed_trades) * 100) if closed_trades else 0.0
 
-    net_profit = balance - INITIAL_BALANCE
-    net_pct = (net_profit / INITIAL_BALANCE) * 100
-    win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0.0
-    gross_win = sum(t["pnl"] for t in wins)
-    gross_loss = abs(sum(t["pnl"] for t in losses))
-    profit_factor = (gross_win / gross_loss) if gross_loss > 0 else float("inf")
+    return {
+        "name": exp["name"],
+        "final": balance,
+        "net_pct": ((balance - INITIAL_BALANCE) / INITIAL_BALANCE) * 100,
+        "dd": max_dd,
+        "pf": pf,
+        "trades": len(closed_trades),
+        "wr": wr,
+        "long_pnl": sum(t["pnl"] for t in longs),
+        "short_pnl": sum(t["pnl"] for t in shorts),
+    }
 
-    print("\n" + "=" * 55)
-    print(f"📊 90-DAY BACKTEST REPORT (Strategy v4.2)")
-    print("=" * 55)
-    print(f"Initial Balance  : ${INITIAL_BALANCE:.2f}")
-    print(f"Final Balance    : ${balance:.2f}")
-    print(f"Net Profit/Loss  : ${net_profit:+.2f} ({net_pct:+.2f}%)")
-    print(f"Max Drawdown     : {max_drawdown_pct:.2f}%")
-    print(f"Profit Factor    : {profit_factor:.2f}")
-    print("-" * 55)
-    print(f"Total Executions : {len(closed_trades)} (Includes TP1 partials)")
-    print(f"Win Rate         : {win_rate:.1f}% (Wins: {len(wins)} | Losses: {len(losses)})")
-    print(f"LONG Executions  : {len(long_trades)} | Net PnL: ${sum(t['pnl'] for t in long_trades):+.2f}")
-    print(f"SHORT Executions : {len(short_trades)} | Net PnL: ${sum(t['pnl'] for t in short_trades):+.2f}")
-    print(f"Open at End      : {len(open_positions)}")
-    print("=" * 55 + "\n")
+
+def main():
+    now_utc = datetime.now(timezone.utc)
+    warmup_start = now_utc - timedelta(days=DAYS_BACK + 35)
+    test_start = pd.Timestamp(now_utc - timedelta(days=DAYS_BACK))
+    since_ms = int(warmup_start.timestamp() * 1000)
+
+    logging.info("Fetching 90-day (+warmup) historical data once for A/B experiments...")
+    data_store = {}
+    for sym in ALL_SYMBOLS:
+        logging.info("Fetching %s...", sym)
+        df15 = fetch_historical_ohlcv(sym, "15m", since_ms)
+        df1 = fetch_historical_ohlcv(sym, "1h", since_ms)
+        df4 = fetch_historical_ohlcv(sym, "4h", since_ms)
+        if min(len(df15), len(df1), len(df4)) > MIN_CANDLES:
+            d1_clean = validate_data(df1, 60)
+            adx_s, _, _ = calculate_directional_adx(d1_clean)
+            active_1h = set(d1_clean.loc[adx_s >= 22.0, "timestamp"])
+            data_store[sym] = {
+                "15m": df15, "1h": df1, "4h": df4, "active_1h": active_1h,
+                "ts_15m": df15["timestamp"].values, "ts_1h": df1["timestamp"].values, "ts_4h": df4["timestamp"].values,
+            }
+
+    all_timestamps = sorted(set(
+        ts for sym_data in data_store.values()
+        for ts in sym_data["15m"]["timestamp"]
+        if ts >= test_start
+    ))
+
+    logging.info("Precomputing candidate setups across %d steps...", len(all_timestamps))
+    raw_candidates = precompute_signals(data_store, all_timestamps, test_start)
+
+    print("\n" + "=" * 105)
+    print(f"{'EXPERIMENT':<36} | {'FINAL $':>8} | {'NET %':>8} | {'MAX DD':>7} | {'PF':>5} | {'TRADES':>6} | {'WIN %':>6} | {'LONG $':>7} | {'SHORT $':>7}")
+    print("=" * 105)
+    for exp in EXPERIMENTS:
+        res = simulate_experiment(exp, data_store, all_timestamps, raw_candidates)
+        print(
+            f"{res['name']:<36} | "
+            f"${res['final']:>7.2f} | "
+            f"{res['net_pct']:>+7.2f}% | "
+            f"{res['dd']:>6.2f}% | "
+            f"{res['pf']:>5.2f} | "
+            f"{res['trades']:>6d} | "
+            f"{res['wr']:>5.1f}% | "
+            f"{res['long_pnl']:>+7.2f} | "
+            f"{res['short_pnl']:>+7.2f}"
+        )
+    print("=" * 105 + "\n")
 
 
 if __name__ == "__main__":
-    run_backtest()
+    main()
