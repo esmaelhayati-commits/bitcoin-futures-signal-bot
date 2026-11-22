@@ -7,12 +7,13 @@ import pandas as pd
 
 logger = logging.getLogger("smc_strategy")
 
-STRATEGY_VERSION = "5.0"
+STRATEGY_VERSION = "5.1"
 MIN_CANDLES = 200
 
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-MIN_ADX_TREND = 25.0
+MIN_ADX_SHORT = 25.0
+MIN_ADX_LONG = 30.0
 MIN_STOP_ATR = 0.6
 MAX_STOP_ATR = 2.2
 STOP_BUFFER_ATR = 0.3
@@ -141,10 +142,6 @@ def hold(code: str, reason: str, **extra) -> dict:
 
 
 def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_closed: bool = True) -> dict:
-    """
-    Strategy v5.0: 4H Trend Alignment + 1H Clean EMA20 Pullback & Rejection.
-    Evaluates on newly closed 1H candles (or any closed 1H candle via SignalGuard).
-    """
     try:
         d1 = validate_data(df_1h, 60)
         d4 = validate_data(df_4h, 240)
@@ -166,12 +163,17 @@ def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_clos
         ema20_4h_s = d4["close"].ewm(span=20, adjust=False).mean()
         ema50_4h_s = d4["close"].ewm(span=50, adjust=False).mean()
         ema20_4h = float(ema20_4h_s.iloc[-1])
-        ema20_4h_prev = float(ema20_4h_s.iloc[-3])
+        ema20_4h_prev = float(ema20_4h_s.iloc[-4])
         ema50_4h = float(ema50_4h_s.iloc[-1])
+        ema50_4h_prev = float(ema50_4h_s.iloc[-4])
         close_4h = float(d4["close"].iloc[-1])
 
-        # Stricter slope check for LONG to prevent weak bounce traps
-        bull_4h = (close_4h > ema20_4h > ema50_4h) and (ema20_4h > ema20_4h_prev)
+        # High-conviction 4H bullish trend (both EMA20 and EMA50 rising)
+        bull_4h = (
+            (close_4h > ema20_4h > ema50_4h)
+            and (ema20_4h > ema20_4h_prev)
+            and (ema50_4h > ema50_4h_prev)
+        )
         bear_4h = (close_4h < ema20_4h < ema50_4h)
 
         # 1H Indicators
@@ -186,7 +188,7 @@ def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_clos
         if not np.isfinite(atr_1h) or atr_1h <= 0:
             return hold("HOLD_INVALID_ATR", "مقدار ATR نامعتبر است", symbol=symbol)
 
-        if not np.isfinite(adx_1h) or adx_1h < MIN_ADX_TREND:
+        if not np.isfinite(adx_1h) or adx_1h < MIN_ADX_SHORT:
             return hold("HOLD_LOW_ADX", f"قدرت روند ۱H پایین است (ADX={adx_1h:.1f})", symbol=symbol)
 
         bar = d1.iloc[-1]
@@ -214,8 +216,13 @@ def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_clos
         signal_side = None
         stop_loss = 0.0
 
-        # LONG Setup: 4H Bullish + 1H EMA20 > EMA50 + Pullback wick into EMA20 + Bullish Close above EMA20
-        if bull_4h and (ema20_1h > ema50_1h) and (plus_di > minus_di):
+        # LONG Setup: Strong 4H Uptrend + ADX >= 30 + Dominant +DI
+        if (
+            bull_4h
+            and (ema20_1h > ema50_1h)
+            and (adx_1h >= MIN_ADX_LONG)
+            and ((plus_di - minus_di) >= 10.0)
+        ):
             if low <= ema20_1h * 1.001 and price > ema20_1h and price > op:
                 sl_cand = min(low, ema50_1h) - STOP_BUFFER_ATR * atr_1h
                 risk_cand = price - sl_cand
@@ -223,7 +230,7 @@ def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_clos
                     signal_side = "LONG"
                     stop_loss = sl_cand
 
-        # SHORT Setup: 4H Bearish + 1H EMA20 < EMA50 + Pullback wick into EMA20 + Bearish Close below EMA20
+        # SHORT Setup: 4H Bearish + 1H EMA20 < EMA50 + Clean Pullback Rejection
         elif bear_4h and (ema20_1h < ema50_1h) and (minus_di > plus_di):
             if high >= ema20_1h * 0.999 and price < ema20_1h and price < op:
                 sl_cand = max(high, ema50_1h) + STOP_BUFFER_ATR * atr_1h
@@ -273,8 +280,6 @@ def generate_signal(df_15m, df_1h, df_4h, symbol=None, now=None, only_closed=Tru
 
 
 class SignalGuard:
-    """Prevents duplicate entries on the same 1H candle or within cooldown."""
-
     def __init__(self, cooldown_minutes: int = 120, path: str = None):
         self.cooldown = pd.Timedelta(minutes=cooldown_minutes)
         self.path = path
