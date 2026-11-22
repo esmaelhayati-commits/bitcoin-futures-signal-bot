@@ -718,9 +718,9 @@
             "time": "2026-11-21 12:24:51.754081+00:00"
         }
     ],
-    "symbol_cooldowns": {},
-    "last_signal_candles": {},
-    "last_daily_report": "2026-11-21",
+    "last_daily_report": "2026-11-22",
     "last_weekly_report": "2026-W47",
-    "last_monthly_report": "2026-11"
+    "last_monthly_report": "2026-11",
+    "symbol_cooldowns": {},
+    "last_signal_candles": {}
 }
