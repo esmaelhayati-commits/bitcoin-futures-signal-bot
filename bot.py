@@ -17,11 +17,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 API_KEY = os.getenv("XT_API_KEY")
 API_SECRET = os.getenv("XT_API_SECRET")
 
-LIVE_TRADING = False            # Switch to True after final v5.0 backtest check
+LIVE_TRADING = False            # Switch to True when ready to trade live funds
 LEVERAGE = 25                   # High capital efficiency with safe liquidation distance
-RISK_PER_TRADE = 0.025          # 2.5% risk per trade for higher net returns
+RISK_PER_TRADE = 0.02           # 2.0% risk per trade (optimal balance of growth & drawdown)
 BREAKEVEN_TRIGGER_R = 1.2       # Move SL to breakeven (+fee buffer) once price reaches +1.2R
-MAX_OPEN_POSITIONS = 3
+MAX_OPEN_POSITIONS = 2
 MAX_SAME_SIDE_POSITIONS = 2
 MIN_SL_PCT = 0.004              # Minimum 0.4% SL distance
 COOLDOWN_MINUTES = 120          # Prevent re-entering same symbol/side within 2 hours
