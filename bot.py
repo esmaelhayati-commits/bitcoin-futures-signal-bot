@@ -17,13 +17,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 API_KEY = os.getenv("XT_API_KEY")
 API_SECRET = os.getenv("XT_API_SECRET")
 
-LIVE_TRADING = False            # Switch to True only after XT API setup and validation
-LEVERAGE = 20
-RISK_PER_TRADE = 0.015          # 1.5% max risk per trade
-MAX_OPEN_POSITIONS = 2
+LIVE_TRADING = False            # Switch to True after final v5.0 backtest check
+LEVERAGE = 25                   # High capital efficiency with safe liquidation distance
+RISK_PER_TRADE = 0.025          # 2.5% risk per trade for higher net returns
+BREAKEVEN_TRIGGER_R = 1.2       # Move SL to breakeven (+fee buffer) once price reaches +1.2R
+MAX_OPEN_POSITIONS = 3
 MAX_SAME_SIDE_POSITIONS = 2
 MIN_SL_PCT = 0.004              # Minimum 0.4% SL distance
-COOLDOWN_MINUTES = 60           # Prevent re-entering same symbol/side within 60 minutes
+COOLDOWN_MINUTES = 120          # Prevent re-entering same symbol/side within 2 hours
 FEE_RATE = 0.0005               # 0.05% taker fee per side
 INITIAL_BALANCE = 100.0
 
@@ -113,26 +114,30 @@ def fetch_candles(symbol: str, timeframe: str, retries: int = 3):
 
 
 # ==================== LIVE EXCHANGE EXECUTION HELPERS ====================
-def execute_live_entry(symbol: str, side: str, raw_qty: float, stop_loss: float, take_profit: float):
-    exchange.set_leverage(LEVERAGE, symbol)
-    qty = float(exchange.amount_to_precision(symbol, raw_qty))
+def place_protection_orders(symbol: str, side: str, qty: float, stop_loss: float, take_profit: float):
+    close_side = "sell" if side == "LONG" else "buy"
+    clean_qty = float(exchange.amount_to_precision(symbol, qty))
     sl_price = float(exchange.price_to_precision(symbol, stop_loss))
     tp_price = float(exchange.price_to_precision(symbol, take_profit))
 
-    order_side = "buy" if side == "LONG" else "sell"
-    close_side = "sell" if side == "LONG" else "buy"
-
-    entry_order = exchange.create_market_order(symbol, order_side, qty)
-    filled_price = float(entry_order.get("average") or entry_order.get("price") or 0)
-
     exchange.create_order(
-        symbol, "market", close_side, qty, None,
+        symbol, "market", close_side, clean_qty, None,
         params={"stopPrice": sl_price, "reduceOnly": True}
     )
     exchange.create_order(
-        symbol, "market", close_side, qty, None,
+        symbol, "market", close_side, clean_qty, None,
         params={"stopPrice": tp_price, "reduceOnly": True}
     )
+
+
+def execute_live_entry(symbol: str, side: str, raw_qty: float, stop_loss: float, take_profit: float):
+    exchange.set_leverage(LEVERAGE, symbol)
+    qty = float(exchange.amount_to_precision(symbol, raw_qty))
+    order_side = "buy" if side == "LONG" else "sell"
+
+    entry_order = exchange.create_market_order(symbol, order_side, qty)
+    filled_price = float(entry_order.get("average") or entry_order.get("price") or 0)
+    place_protection_orders(symbol, side, qty, stop_loss, take_profit)
     return qty, filled_price
 
 
@@ -158,20 +163,20 @@ def manage_positions(state):
             entry = pos["entry"]
             stop_loss = pos["stop_loss"]
             take_profit = pos["take_profit"]
-            tp1 = pos["tp1"]
-            is_tp1_hit = pos.get("is_tp1_hit", False)
+            risk_dist = pos.get("risk_dist", abs(entry - stop_loss))
+            is_be = pos.get("is_breakeven", False)
             qty = pos["quantity"]
 
             if side == "LONG":
                 pnl_pct = ((current_price - entry) / entry) * 100
                 hit_sl = current_price <= stop_loss
-                hit_tp2 = current_price >= take_profit
-                hit_tp1 = not is_tp1_hit and current_price >= tp1
+                hit_tp = current_price >= take_profit
+                hit_be_trigger = (not is_be) and (current_price >= entry + risk_dist * BREAKEVEN_TRIGGER_R)
             else:
                 pnl_pct = ((entry - current_price) / entry) * 100
                 hit_sl = current_price >= stop_loss
-                hit_tp2 = current_price <= take_profit
-                hit_tp1 = not is_tp1_hit and current_price <= tp1
+                hit_tp = current_price <= take_profit
+                hit_be_trigger = (not is_be) and (current_price <= entry - risk_dist * BREAKEVEN_TRIGGER_R)
 
             # 1. Stop Loss or Breakeven Exit
             if hit_sl:
@@ -187,8 +192,7 @@ def manage_positions(state):
                 net_pnl = gross_pnl - exit_fee
                 state["balance"] += net_pnl
 
-                reason = "BREAKEVEN (Risk-Free)" if pos.get("is_breakeven") and gross_pnl >= 0 else "STOP_LOSS"
-
+                reason = "BREAKEVEN (Risk-Free)" if is_be and gross_pnl >= 0 else "STOP_LOSS"
                 lines = [
                     f"🛑 <b>Position Closed: {reason}</b>",
                     "------------------------------------",
@@ -207,14 +211,14 @@ def manage_positions(state):
                 })
                 continue
 
-            # 2. Final TP2 Hit (Full Close)
-            if hit_tp2:
+            # 2. Full Take Profit Hit (100% Volume)
+            if hit_tp:
                 if LIVE_TRADING:
                     try:
                         exchange.cancel_all_orders(symbol)
                         close_live_position(symbol, side, qty)
                     except Exception as ex:
-                        logging.error("Live TP2 close error on %s: %s", symbol, ex)
+                        logging.error("Live TP close error on %s: %s", symbol, ex)
 
                 gross_pnl = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
                 exit_fee = (current_price * qty) * FEE_RATE
@@ -222,7 +226,7 @@ def manage_positions(state):
                 state["balance"] += net_pnl
 
                 lines = [
-                    "🎉 <b>Target 2 Hit (Full Close)</b>",
+                    "🎉 <b>Target Hit (Full 100% Profit)</b>",
                     "------------------------------------",
                     f"Symbol: <code>{symbol}</code>",
                     f"Side: <b>{side}</b>",
@@ -235,47 +239,32 @@ def manage_positions(state):
 
                 state["trade_history"].append({
                     "symbol": symbol, "side": side, "pnl": net_pnl, "pct": pnl_pct,
-                    "fee": exit_fee, "reason": "TAKE_PROFIT_2", "time": now_str
+                    "fee": exit_fee, "reason": "TAKE_PROFIT", "time": now_str
                 })
                 continue
 
-            # 3. Partial TP1 Hit (50% Close + Breakeven)
-            if hit_tp1:
-                close_qty = qty / 2.0
-                if LIVE_TRADING:
-                    try:
-                        close_live_position(symbol, side, close_qty)
-                    except Exception as ex:
-                        logging.error("Live TP1 partial close error on %s: %s", symbol, ex)
-
-                gross_pnl = (tp1 - entry) * close_qty if side == "LONG" else (entry - tp1) * close_qty
-                exit_fee = (tp1 * close_qty) * FEE_RATE
-                realized_pnl = gross_pnl - exit_fee
-                state["balance"] += realized_pnl
-
-                fee_buffer = entry * (FEE_RATE * 2)
+            # 3. Breakeven Lock at +1.2R (Keep 100% volume running for full TP)
+            if hit_be_trigger:
+                fee_buffer = entry * (FEE_RATE * 2.5)
                 breakeven_sl = entry + fee_buffer if side == "LONG" else entry - fee_buffer
-
-                pos["quantity"] = close_qty
                 pos["stop_loss"] = breakeven_sl
                 pos["is_breakeven"] = True
-                pos["is_tp1_hit"] = True
+
+                if LIVE_TRADING:
+                    try:
+                        exchange.cancel_all_orders(symbol)
+                        place_protection_orders(symbol, side, qty, breakeven_sl, take_profit)
+                    except Exception as ex:
+                        logging.error("Live BE order update error on %s: %s", symbol, ex)
 
                 lines = [
-                    "💰 <b>Partial TP1 Hit (50% Closed)</b>",
+                    "🛡️ <b>Risk-Free Mode Activated (+1.2R Reached)</b>",
                     "------------------------------------",
-                    f"Symbol: <code>{symbol}</code>",
-                    f"Side: <b>{side}</b>",
-                    f"Realized Net PnL: <b>{realized_pnl:+.4f} USDT</b>",
-                    f"Stop Loss moved to Breakeven (+fee buffer): <code>{breakeven_sl:.4f}</code>",
-                    f"Target 2: <code>{take_profit:.4f}</code>"
+                    f"Symbol: <code>{symbol}</code> | Side: <b>{side}</b>",
+                    f"Stop Loss moved to Breakeven: <code>{breakeven_sl:.4f}</code>",
+                    f"100% Position running toward Target: <code>{take_profit:.4f}</code>"
                 ]
                 send_telegram("\n".join(lines))
-
-                state["trade_history"].append({
-                    "symbol": symbol, "side": side, "pnl": realized_pnl, "pct": pnl_pct,
-                    "fee": exit_fee, "reason": "PARTIAL_TP1", "time": now_str
-                })
 
             remaining_positions[symbol] = pos
 
@@ -312,8 +301,6 @@ def open_position(symbol, signal_data, state):
     else:
         price_risk = raw_risk
 
-    tp1 = entry + (target - entry) * 0.5
-
     balance = state.get("balance", INITIAL_BALANCE)
     if LIVE_TRADING:
         try:
@@ -333,7 +320,6 @@ def open_position(symbol, signal_data, state):
             quantity, filled_entry = execute_live_entry(symbol, side, quantity, stop, target)
             if filled_entry > 0:
                 entry = filled_entry
-                tp1 = entry + (target - entry) * 0.5
         except Exception as e:
             logging.error("Live order execution failed on %s: %s", symbol, e)
             send_telegram(f"⚠️ <b>Live Order Failed</b> on <code>{symbol}</code>: {e}")
@@ -358,11 +344,10 @@ def open_position(symbol, signal_data, state):
         "quantity": quantity,
         "stop_loss": stop,
         "take_profit": target,
-        "tp1": tp1,
+        "risk_dist": price_risk,
         "margin_cost": margin_cost,
         "entry_fee": entry_fee,
         "zone_id": signal_data.get("zone_id", ""),
-        "is_tp1_hit": False,
         "is_breakeven": False,
         "opened_at": str(datetime.now(timezone.utc))
     }
@@ -373,11 +358,10 @@ def open_position(symbol, signal_data, state):
         "------------------------------------",
         f"Symbol: <code>{symbol}</code>",
         f"Setup: <b>{structure_1h}</b> | ADX: <b>{adx_1h}</b> | Score: <b>{confidence}%</b>",
-        f"Leverage: <b>{LEVERAGE}x</b>",
+        f"Leverage: <b>{LEVERAGE}x</b> | Risk: <b>{RISK_PER_TRADE*100:.1f}%</b>",
         f"Entry: <code>{entry:.4f}</code>",
         f"Stop Loss: <code>{stop:.4f}</code> (Max Risk: ${risk_amount:.2f})",
-        f"TP1 (50% Close): <code>{tp1:.4f}</code>",
-        f"TP2 (Final): <code>{target:.4f}</code>",
+        f"Target (Full 2.0R): <code>{target:.4f}</code>",
         f"Quantity: <code>{quantity:.4f}</code>",
         "------------------------------------",
         f"💵 <b>Margin Used:</b> <code>{margin_cost:.2f} USDT</code>",
@@ -462,11 +446,10 @@ def main():
             continue
 
         try:
-            df15 = fetch_candles(symbol, "15m")
             df1 = fetch_candles(symbol, "1h")
             df4 = fetch_candles(symbol, "4h")
 
-            sig = analyze_market(df15, df1, df4, symbol=symbol, only_closed=True)
+            sig = analyze_market(None, df1, df4, symbol=symbol, only_closed=True)
             logging.info("%s -> %s (%s)", symbol, sig.get("code"), sig.get("reason"))
 
             if sig.get("signal") in ["LONG", "SHORT"]:
