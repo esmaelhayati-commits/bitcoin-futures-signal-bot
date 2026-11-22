@@ -7,34 +7,23 @@ import pandas as pd
 
 logger = logging.getLogger("smc_strategy")
 
-STRATEGY_VERSION = "4.2"
-MIN_CANDLES = 200               # indicator warm-up (EWM ADX/ATR need ~100+ candles)
-
-SWING_LOOKBACK = 5
-STRUCTURE_RECENT_CANDLES = 6    # BOS/CHoCH must have happened within the last N closed 1H candles
-MAX_FVG_AGE_CANDLES = 48        # on 15m (= 12 hours)
-MIN_FVG_ATR_MULTIPLIER = 0.35
-MIN_MOVE_AWAY_ATR = 1.0         # price must leave the FVG by >= 1 ATR before the pullback counts
-STOP_BUFFER_ATR = 0.25
-MIN_STOP_ATR = 1.0
-MAX_STOP_ATR = 2.2
-RR_RATIO = 2.0                  # NET risk/reward (after fees + slippage)
-
-FEE_PCT_PER_SIDE = 0.0005       # 0.05% (adjust to your exchange)
-SLIPPAGE_PCT_PER_SIDE = 0.0002  # 0.02%
-ROUND_TRIP_COST_PCT = 2 * (FEE_PCT_PER_SIDE + SLIPPAGE_PCT_PER_SIDE)
+STRATEGY_VERSION = "5.0"
+MIN_CANDLES = 200
 
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-MIN_ADX_TREND = 22.0
-VOLUME_MA_PERIOD = 20
+MIN_ADX_TREND = 25.0
+MIN_STOP_ATR = 0.6
+MAX_STOP_ATR = 2.2
+STOP_BUFFER_ATR = 0.3
+RR_RATIO = 2.0
+
+FEE_PCT_PER_SIDE = 0.0005
+SLIPPAGE_PCT_PER_SIDE = 0.0002
+ROUND_TRIP_COST_PCT = 2 * (FEE_PCT_PER_SIDE + SLIPPAGE_PCT_PER_SIDE)
 
 
-# --------------------------------------------------------------------------
-# Data handling
-# --------------------------------------------------------------------------
 def _to_datetime(s: pd.Series) -> pd.Series:
-    """Handles datetime, epoch s/ms/us/ns (numeric or numeric strings) and ISO strings. Always UTC."""
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s, utc=True)
     num = pd.to_numeric(s, errors="coerce")
@@ -83,16 +72,12 @@ def validate_data(df: pd.DataFrame, tf_minutes: int) -> pd.DataFrame:
     if len(out) < 2:
         return out[["timestamp"] + required]
 
-    # Reject only major gaps in the working window; 3.5x tolerates up to 2 skipped candles
-    # (e.g. zero-volume candles missing on XT).
     tail = out["timestamp"].iloc[-MIN_CANDLES:]
     if len(tail) > 1:
         gaps = tail.diff().dropna().dt.total_seconds() / 60.0
         if (gaps > tf_minutes * 3.5).any():
             raise ValueError(f"Major gap in {tf_minutes}m candles")
 
-    # Fill tolerated gaps (flat candle at previous close, zero volume) so FVG patterns and
-    # swing windows never span a hole. Only when all timestamps sit on the timeframe grid.
     freq = f"{tf_minutes}min"
     on_grid = out["timestamp"].dt.floor(freq).eq(out["timestamp"]).all()
     if on_grid and len(out) > 1:
@@ -104,11 +89,11 @@ def validate_data(df: pd.DataFrame, tf_minutes: int) -> pd.DataFrame:
                 out[c] = out[c].fillna(out["close"])
             out["volume"] = out["volume"].fillna(0.0)
             out = out.rename_axis("timestamp").reset_index()
+
     return out[["timestamp"] + required]
 
 
 def drop_unclosed(df: pd.DataFrame, tf_minutes: int, now=None) -> pd.DataFrame:
-    """Removes the last candle if it is still forming."""
     now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
     if now.tzinfo is None:
         now = now.tz_localize("UTC")
@@ -117,9 +102,6 @@ def drop_unclosed(df: pd.DataFrame, tf_minutes: int, now=None) -> pd.DataFrame:
     return df
 
 
-# --------------------------------------------------------------------------
-# Indicators
-# --------------------------------------------------------------------------
 def _true_range(df: pd.DataFrame) -> pd.Series:
     prev_close = df["close"].shift(1)
     return pd.concat([
@@ -149,135 +131,6 @@ def calculate_directional_adx(df: pd.DataFrame, period: int = ADX_PERIOD):
     return adx, plus_di, minus_di
 
 
-# --------------------------------------------------------------------------
-# Structure
-# --------------------------------------------------------------------------
-def identify_swings(df: pd.DataFrame, lookback: int = SWING_LOOKBACK):
-    window = 2 * lookback + 1
-    rmax = df["high"].rolling(window=window, center=True).max()
-    rmin = df["low"].rolling(window=window, center=True).min()
-    hi_mask = ((df["high"] == rmax) & rmax.notna()).values
-    lo_mask = ((df["low"] == rmin) & rmin.notna()).values
-    highs, lows = df["high"].values, df["low"].values
-    swing_highs = [(int(i), float(highs[i])) for i in np.flatnonzero(hi_mask)]
-    swing_lows = [(int(i), float(lows[i])) for i in np.flatnonzero(lo_mask)]
-    return swing_highs, swing_lows
-
-
-def detect_market_structure(df: pd.DataFrame) -> dict:
-    """
-    Fresh break of the last swing (closed candles only).
-    BOS   = break in the direction of the prior structure (higher low / lower high)
-    CHOCH = break against it.
-    The structure stays valid until the impulse origin (leg start) is lost.
-    """
-    swing_highs, swing_lows = identify_swings(df)
-    if len(swing_highs) < 2 or len(swing_lows) < 2:
-        return {"type": "RANGE", "direction": None}
-
-    last_sh_idx, last_sh = swing_highs[-1]
-    _, prev_sh = swing_highs[-2]
-    last_sl_idx, last_sl = swing_lows[-1]
-    _, prev_sl = swing_lows[-2]
-
-    closes, highs, lows = df["close"].values, df["high"].values, df["low"].values
-    n = len(df)
-    first = max(1, n - STRUCTURE_RECENT_CANDLES)
-
-    bull_idx = -1
-    for i in range(max(last_sh_idx + 1, first), n):
-        if closes[i] > last_sh and closes[i - 1] <= last_sh:
-            bull_idx = i
-
-    bear_idx = -1
-    for i in range(max(last_sl_idx + 1, first), n):
-        if closes[i] < last_sl and closes[i - 1] >= last_sl:
-            bear_idx = i
-
-    if bull_idx > bear_idx and bull_idx != -1:
-        leg_start = last_sh_idx + int(np.argmin(lows[last_sh_idx:bull_idx + 1]))
-        if closes[-1] > lows[leg_start]:
-            return {
-                "type": "BULLISH_BOS" if last_sl > prev_sl else "BULLISH_CHOCH",
-                "direction": "LONG", "break_idx": bull_idx, "level": last_sh,
-                "leg_start_idx": leg_start, "invalidation": float(lows[leg_start]),
-            }
-
-    if bear_idx > bull_idx and bear_idx != -1:
-        leg_start = last_sl_idx + int(np.argmax(highs[last_sl_idx:bear_idx + 1]))
-        if closes[-1] < highs[leg_start]:
-            return {
-                "type": "BEARISH_BOS" if last_sh < prev_sh else "BEARISH_CHOCH",
-                "direction": "SHORT", "break_idx": bear_idx, "level": last_sl,
-                "leg_start_idx": leg_start, "invalidation": float(highs[leg_start]),
-            }
-
-    return {"type": "RANGE", "direction": None}
-
-
-def detect_unmitigated_fvgs(df: pd.DataFrame, side: str) -> list:
-    """
-    FVGs on closed 15m candles, sized by ATR, not mitigated (no later candle reached
-    the 50% level / closed through it), and price must have left the gap by >= MIN_MOVE_AWAY_ATR.
-    The last candle (n-1) is the candidate tap candle and is excluded from mitigation checks.
-    """
-    n = len(df)
-    highs, lows, closes = df["high"].values, df["low"].values, df["close"].values
-    vols = df["volume"].values
-    atrs = df["atr"].values
-    ts = df["timestamp"]
-    out = []
-
-    for i in range(max(2, n - MAX_FVG_AGE_CANDLES), n - 2):
-        # none of the 3 FVG candles may be a synthetic (padded) zero-volume candle
-        if vols[i] <= 0 or vols[i - 1] <= 0 or vols[i - 2] <= 0:
-            continue
-
-        atr_i = atrs[i]
-        if not np.isfinite(atr_i) or atr_i <= 0:
-            continue
-
-        if side == "LONG":
-            if lows[i] <= highs[i - 2]:
-                continue
-            top, bottom = float(lows[i]), float(highs[i - 2])
-        else:
-            if highs[i] >= lows[i - 2]:
-                continue
-            top, bottom = float(lows[i - 2]), float(highs[i])
-
-        gap = top - bottom
-        if gap < MIN_FVG_ATR_MULTIPLIER * atr_i:
-            continue
-
-        mid = (top + bottom) / 2.0
-        mitigated, away = False, 0.0
-        for k in range(i + 1, n - 1):
-            if side == "LONG":
-                if closes[k] < bottom or lows[k] <= mid:
-                    mitigated = True
-                    break
-                away = max(away, highs[k] - top)
-            else:
-                if closes[k] > top or highs[k] >= mid:
-                    mitigated = True
-                    break
-                away = max(away, bottom - lows[k])
-
-        if mitigated or away < MIN_MOVE_AWAY_ATR * atr_i:
-            continue
-
-        mid_ts = ts.iloc[i - 1]
-        out.append({
-            "top": top, "bottom": bottom, "mid": mid, "gap_atr": gap / atr_i,
-            "mid_ts": mid_ts, "zone_id": f"{side}:{mid_ts.isoformat()}:{bottom:.4f}:{top:.4f}",
-        })
-    return out
-
-
-# --------------------------------------------------------------------------
-# Signal
-# --------------------------------------------------------------------------
 def hold(code: str, reason: str, **extra) -> dict:
     res = {
         "signal": "HOLD", "side": "HOLD", "code": code, "confidence": 0,
@@ -287,171 +140,128 @@ def hold(code: str, reason: str, **extra) -> dict:
     return res
 
 
-def _evaluate_side(side: str, c: dict):
-    """Returns (result | None, stage, code, reason). A higher stage means the setup got further."""
-    is_long = side == "LONG"
-    s = c["struct"]
-
-    if not (s["direction"] == side and c["d4_ok"][side] and c["di_ok"][side]):
-        return None, 0, "HOLD_NO_ALIGNMENT", "هم‌جهتی ۴H / ساختار ۱H / DI برقرار نیست"
-
-    fvgs = detect_unmitigated_fvgs(c["d15"], side)
-    if not fvgs:
-        return None, 2, "HOLD_NO_FVG", "FVG دست‌نخورده با فاصله‌گرفتن کافی وجود ندارد"
-
-    linked = [f for f in fvgs if c["leg_start_ts"] <= f["mid_ts"] <= c["leg_end_ts"]]
-    if not linked:
-        return None, 3, "HOLD_FVG_NOT_LINKED", "FVG داخل لگ شکست ساختار ۱H نیست"
-
-    price, op, low, high = c["price"], c["open"], c["low"], c["high"]
-    atr = c["atr"]
-    stage, code, msg = 3, "HOLD_FVG_NOT_LINKED", ""
-
-    for fvg in reversed(linked):
-        mid = fvg["mid"]
-        if is_long:
-            tapped = low <= fvg["top"] and price >= fvg["bottom"]
-            rejection = price > op and price > mid
-        else:
-            tapped = high >= fvg["bottom"] and price <= fvg["top"]
-            rejection = price < op and price < mid
-
-        if not tapped:
-            if stage < 4:
-                stage, code, msg = 4, "HOLD_NO_TAP", "قیمت هنوز به FVG نرسیده"
-            continue
-        if not rejection:
-            if stage < 5:
-                stage, code, msg = 5, "HOLD_NO_REJECTION", "تپ شده ولی کندل برگشتی بسته نشده"
-            continue
-
-        if is_long:
-            stop = fvg["bottom"] - STOP_BUFFER_ATR * atr
-            risk = price - stop
-        else:
-            stop = fvg["top"] + STOP_BUFFER_ATR * atr
-            risk = stop - price
-
-        if risk > MAX_STOP_ATR * atr:
-            if stage < 6:
-                stage, code, msg = 6, "HOLD_RISK_TOO_WIDE", "استاپ از سقف مجاز ATR بزرگ‌تر است"
-            continue
-        if risk < MIN_STOP_ATR * atr:
-            risk = MIN_STOP_ATR * atr
-            stop = price - risk if is_long else price + risk
-
-        # Net RR: costs are added to both the risk and the required reward
-        cost = price * ROUND_TRIP_COST_PCT
-        reward = RR_RATIO * (risk + cost) + cost
-        target = price + reward if is_long else price - reward
-
-        conf = 55
-        if "BOS" in s["type"]:
-            conf += 10
-        if c["adx_1h"] >= 28:
-            conf += 10
-        if c["vol_ma"] > 0 and c["vol"] > c["vol_ma"]:
-            conf += 10
-        if fvg["gap_atr"] >= 0.6:
-            conf += 5
-        if abs(c["plus_di"] - c["minus_di"]) >= 10:
-            conf += 5
-
-        word = "صعودی" if is_long else "نزولی"
-        return {
-            **c["common"],
-            "signal": side, "side": side, "code": f"SIGNAL_{side}",
-            "stop": stop, "stop_loss": stop, "target": target, "take_profit": target,
-            "risk_dist": risk, "cost_pct": ROUND_TRIP_COST_PCT,
-            "zone_id": fvg["zone_id"],
-            "confidence": min(conf, 95),   # heuristic score, NOT a win probability
-            "reason": f"روند {word} ({s['type']}) + پولبک به FVG دست‌نخورده داخل لگ شکست",
-        }, 7, f"SIGNAL_{side}", ""
-
-    return None, stage, code, msg
-
-
 def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_closed: bool = True) -> dict:
+    """
+    Strategy v5.0: 4H Trend Alignment + 1H Clean EMA20 Pullback & Rejection.
+    Evaluates on newly closed 1H candles (or any closed 1H candle via SignalGuard).
+    """
     try:
-        d15 = validate_data(df_15m, 15)
         d1 = validate_data(df_1h, 60)
         d4 = validate_data(df_4h, 240)
 
         if only_closed:
-            d15 = drop_unclosed(d15, 15, now)
             d1 = drop_unclosed(d1, 60, now)
             d4 = drop_unclosed(d4, 240, now)
 
-        if min(len(d15), len(d1), len(d4)) < MIN_CANDLES:
+        if min(len(d1), len(d4)) < MIN_CANDLES:
             return hold("HOLD_INSUFFICIENT_DATA", "تعداد کندل کافی نیست", symbol=symbol)
 
-        # all three frames must end at (almost) the same moment
-        t15_end = d15["timestamp"].iloc[-1] + pd.Timedelta(minutes=15)
-        for df_x, tf in ((d1, 60), (d4, 240)):
-            end_x = df_x["timestamp"].iloc[-1] + pd.Timedelta(minutes=tf)
-            lag_min = (t15_end - end_x).total_seconds() / 60.0
-            if lag_min < -1 or lag_min > tf:
-                return hold("HOLD_DESYNC_DATA", f"عدم هماهنگی زمانی تایم‌فریم {tf}m", symbol=symbol)
+        t1_end = d1["timestamp"].iloc[-1] + pd.Timedelta(minutes=60)
+        t4_end = d4["timestamp"].iloc[-1] + pd.Timedelta(minutes=240)
+        lag_min = (t1_end - t4_end).total_seconds() / 60.0
+        if lag_min < -1 or lag_min > 240:
+            return hold("HOLD_DESYNC_DATA", "عدم هماهنگی زمانی تایم‌فریم ۱H و ۴H", symbol=symbol)
 
-        d15["atr"] = calculate_atr(d15)
-        d15["vol_ma"] = d15["volume"].rolling(VOLUME_MA_PERIOD).mean().shift(1)
+        # 4H Trend Filter
+        ema20_4h_s = d4["close"].ewm(span=20, adjust=False).mean()
+        ema50_4h_s = d4["close"].ewm(span=50, adjust=False).mean()
+        ema20_4h = float(ema20_4h_s.iloc[-1])
+        ema20_4h_prev = float(ema20_4h_s.iloc[-3])
+        ema50_4h = float(ema50_4h_s.iloc[-1])
+        close_4h = float(d4["close"].iloc[-1])
 
-        atr = float(d15["atr"].iloc[-1])
-        if not np.isfinite(atr) or atr <= 0:
+        # Stricter slope check for LONG to prevent weak bounce traps
+        bull_4h = (close_4h > ema20_4h > ema50_4h) and (ema20_4h > ema20_4h_prev)
+        bear_4h = (close_4h < ema20_4h < ema50_4h)
+
+        # 1H Indicators
+        ema20_1h = float(d1["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+        ema50_1h = float(d1["close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        atr_1h = float(calculate_atr(d1).iloc[-1])
+        adx_s, pdi_s, mdi_s = calculate_directional_adx(d1)
+        adx_1h = float(adx_s.iloc[-1])
+        plus_di = float(pdi_s.iloc[-1])
+        minus_di = float(mdi_s.iloc[-1])
+
+        if not np.isfinite(atr_1h) or atr_1h <= 0:
             return hold("HOLD_INVALID_ATR", "مقدار ATR نامعتبر است", symbol=symbol)
 
-        vm = d15["vol_ma"].iloc[-1]
-        price = float(d15["close"].iloc[-1])
-
-        adx_s, pdi_s, mdi_s = calculate_directional_adx(d1)
-        adx_1h, plus_di, minus_di = float(adx_s.iloc[-1]), float(pdi_s.iloc[-1]), float(mdi_s.iloc[-1])
         if not np.isfinite(adx_1h) or adx_1h < MIN_ADX_TREND:
-            return hold("HOLD_LOW_ADX", f"قدرت روند پایین است (ADX={adx_1h:.1f})", symbol=symbol)
+            return hold("HOLD_LOW_ADX", f"قدرت روند ۱H پایین است (ADX={adx_1h:.1f})", symbol=symbol)
 
-        struct = detect_market_structure(d1)
-        if struct["type"] == "RANGE":
-            return hold("HOLD_RANGE_1H", "ساختار ۱ ساعته رنج یا نامعتبر است", symbol=symbol)
+        bar = d1.iloc[-1]
+        op = float(bar["open"])
+        high = float(bar["high"])
+        low = float(bar["low"])
+        price = float(bar["close"])
+        candle_time = d1["timestamp"].iloc[-1]
 
-        ema20_s = d4["close"].ewm(span=20, adjust=False).mean()
-        ema50_s = d4["close"].ewm(span=50, adjust=False).mean()
-        ema20, ema20_prev = float(ema20_s.iloc[-1]), float(ema20_s.iloc[-4])
-        ema50 = float(ema50_s.iloc[-1])
-        d4_close = float(d4["close"].iloc[-1])
-        d4_bull = d4_close > ema20 > ema50 and ema20 > ema20_prev
-        d4_bear = d4_close < ema20 < ema50 and ema20 < ema20_prev
-
-        candle_time = d15["timestamp"].iloc[-1]
         common = {
-            "symbol": symbol, "entry": price, "entry_price": price, "atr": atr,
-            "adx_1h": round(adx_1h, 2), "plus_di": round(plus_di, 2), "minus_di": round(minus_di, 2),
-            "structure_1h": struct["type"],
-            "trend_1h": "BULLISH" if struct["direction"] == "LONG" else "BEARISH",
-            "trend_4h": "BULLISH" if d4_bull else ("BEARISH" if d4_bear else "TRANSITION"),
+            "symbol": symbol,
+            "entry": price,
+            "entry_price": price,
+            "atr": atr_1h,
+            "adx_1h": round(adx_1h, 2),
+            "plus_di": round(plus_di, 2),
+            "minus_di": round(minus_di, 2),
+            "structure_1h": "1H_EMA20_PULLBACK",
+            "trend_4h": "BULLISH" if bull_4h else ("BEARISH" if bear_4h else "NEUTRAL"),
             "candle_time": candle_time.isoformat(),
-            "strategy_version": STRATEGY_VERSION, "risk_reward": RR_RATIO,
+            "strategy_version": STRATEGY_VERSION,
+            "risk_reward": RR_RATIO,
         }
 
-        ctx = {
-            "d15": d15, "struct": struct, "common": common, "atr": atr, "price": price,
-            "open": float(d15["open"].iloc[-1]), "low": float(d15["low"].iloc[-1]),
-            "high": float(d15["high"].iloc[-1]), "vol": float(d15["volume"].iloc[-1]),
-            "vol_ma": float(vm) if np.isfinite(vm) else 0.0,
-            "adx_1h": adx_1h, "plus_di": plus_di, "minus_di": minus_di,
-            "d4_ok": {"LONG": d4_bull, "SHORT": d4_bear},
-            "di_ok": {"LONG": plus_di > minus_di, "SHORT": minus_di > plus_di},
-            "leg_start_ts": d1["timestamp"].iloc[struct["leg_start_idx"]],
-            "leg_end_ts": d1["timestamp"].iloc[struct["break_idx"]] + pd.Timedelta(minutes=60),
+        signal_side = None
+        stop_loss = 0.0
+
+        # LONG Setup: 4H Bullish + 1H EMA20 > EMA50 + Pullback wick into EMA20 + Bullish Close above EMA20
+        if bull_4h and (ema20_1h > ema50_1h) and (plus_di > minus_di):
+            if low <= ema20_1h * 1.001 and price > ema20_1h and price > op:
+                sl_cand = min(low, ema50_1h) - STOP_BUFFER_ATR * atr_1h
+                risk_cand = price - sl_cand
+                if MIN_STOP_ATR * atr_1h <= risk_cand <= MAX_STOP_ATR * atr_1h:
+                    signal_side = "LONG"
+                    stop_loss = sl_cand
+
+        # SHORT Setup: 4H Bearish + 1H EMA20 < EMA50 + Pullback wick into EMA20 + Bearish Close below EMA20
+        elif bear_4h and (ema20_1h < ema50_1h) and (minus_di > plus_di):
+            if high >= ema20_1h * 0.999 and price < ema20_1h and price < op:
+                sl_cand = max(high, ema50_1h) + STOP_BUFFER_ATR * atr_1h
+                risk_cand = sl_cand - price
+                if MIN_STOP_ATR * atr_1h <= risk_cand <= MAX_STOP_ATR * atr_1h:
+                    signal_side = "SHORT"
+                    stop_loss = sl_cand
+
+        if not signal_side:
+            return hold("HOLD_NO_PULLBACK", "شرایط پولبک تمیز به EMA20 در ۱H برقرار نیست", **common)
+
+        risk_dist = abs(price - stop_loss)
+        cost = price * ROUND_TRIP_COST_PCT
+        reward = RR_RATIO * (risk_dist + cost) + cost
+        target = price + reward if signal_side == "LONG" else price - reward
+
+        conf = 65
+        if adx_1h >= 30:
+            conf += 10
+        if abs(plus_di - minus_di) >= 10:
+            conf += 10
+
+        word = "صعودی" if signal_side == "LONG" else "نزولی"
+        return {
+            **common,
+            "signal": signal_side,
+            "side": signal_side,
+            "code": f"SIGNAL_{signal_side}",
+            "stop": stop_loss,
+            "stop_loss": stop_loss,
+            "target": target,
+            "take_profit": target,
+            "risk_dist": risk_dist,
+            "cost_pct": ROUND_TRIP_COST_PCT,
+            "zone_id": f"{signal_side}:1H_EMA20:{candle_time.isoformat()}",
+            "confidence": min(conf, 95),
+            "reason": f"روند {word} ۴H + پولبک تمیز به EMA20 یک‌ساعته (ADX={adx_1h:.1f})",
         }
-
-        best = (-1, "HOLD_NO_SETUP", "شرایط ستاپ برقرار نیست")
-        for side in ("LONG", "SHORT"):
-            res, stage, code, msg = _evaluate_side(side, ctx)
-            if res:
-                return res
-            if stage > best[0]:
-                best = (stage, code, msg)
-
-        return hold(best[1], best[2], **common)
 
     except Exception as exc:
         logger.exception("analyze_market failed for %s", symbol)
@@ -462,13 +272,10 @@ def generate_signal(df_15m, df_1h, df_4h, symbol=None, now=None, only_closed=Tru
     return analyze_market(df_15m, df_1h, df_4h, symbol, now=now, only_closed=only_closed)
 
 
-# --------------------------------------------------------------------------
-# Duplicate-signal guard (use it in the bot, right before sending)
-# --------------------------------------------------------------------------
 class SignalGuard:
-    """Blocks repeated signals: same FVG zone, or same symbol+side inside the cooldown."""
+    """Prevents duplicate entries on the same 1H candle or within cooldown."""
 
-    def __init__(self, cooldown_minutes: int = 60, path: str = None):
+    def __init__(self, cooldown_minutes: int = 120, path: str = None):
         self.cooldown = pd.Timedelta(minutes=cooldown_minutes)
         self.path = path
         self.state = {}
