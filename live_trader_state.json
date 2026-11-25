@@ -1,20 +1,6 @@
 {
-    "balance": 97.49651932629446,
-    "positions": {
-        "ETH/USDT:USDT": {
-            "side": "SHORT",
-            "entry": 1644.7,
-            "quantity": 0.05121007123523601,
-            "stop_loss": 1681.1488349534377,
-            "take_profit": 1564.8945900931246,
-            "risk_dist": 36.448834953437654,
-            "margin_cost": 3.369008166423707,
-            "entry_fee": 0.04211260208029634,
-            "zone_id": "SHORT:1H_EMA20:2026-11-25T16:00:00+00:00",
-            "is_breakeven": false,
-            "opened_at": "2026-11-25 17:44:19.601968+00:00"
-        }
-    },
+    "balance": 95.2118211738389,
+    "positions": {},
     "trade_history": [
         {
             "symbol": "LINK/USDT:USDT",
@@ -24,6 +10,15 @@
             "fee": 0.04325569893480558,
             "reason": "STOP_LOSS",
             "time": "2026-11-25 17:44:17.548746+00:00"
+        },
+        {
+            "symbol": "ETH/USDT:USDT",
+            "side": "SHORT",
+            "pnl": -2.284698152455559,
+            "pct": -2.6612756125737205,
+            "fee": 0.04323333448927947,
+            "reason": "STOP_LOSS",
+            "time": "2026-11-25 19:39:39.431758+00:00"
         }
     ],
     "last_daily_report": "2026-11-25",
