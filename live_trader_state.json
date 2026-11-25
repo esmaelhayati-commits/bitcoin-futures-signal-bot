@@ -1,6 +1,20 @@
 {
-    "balance": 100.0,
-    "positions": {},
+    "balance": 99.95793232341325,
+    "positions": {
+        "LINK/USDT:USDT": {
+            "side": "SHORT",
+            "entry": 8.64,
+            "quantity": 9.737888098785588,
+            "stop_loss": 8.836743341820227,
+            "take_profit": 8.210225316359546,
+            "risk_dist": 0.1967433418202269,
+            "margin_cost": 3.3654141269402995,
+            "entry_fee": 0.04206767658675374,
+            "zone_id": "SHORT:1H_EMA20:2026-11-25T15:00:00+00:00",
+            "is_breakeven": false,
+            "opened_at": "2026-11-25 16:45:57.438389+00:00"
+        }
+    },
     "trade_history": [],
     "last_daily_report": "2026-11-25",
     "last_weekly_report": "2026-W48",
