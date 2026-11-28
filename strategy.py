@@ -12,8 +12,8 @@ MIN_CANDLES = 200
 
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-MIN_ADX_SHORT = 25.0
-MIN_ADX_LONG = 30.0
+MIN_ADX_SHORT = 22.0
+MIN_ADX_LONG = 25.0
 MIN_STOP_ATR = 0.6
 MAX_STOP_ATR = 2.2
 STOP_BUFFER_ATR = 0.3
@@ -216,7 +216,7 @@ def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_clos
         signal_side = None
         stop_loss = 0.0
 
-        # LONG Setup: Strong 4H Uptrend + ADX >= 30 + Dominant +DI
+        # LONG Setup: Strong 4H Uptrend + ADX >= 25 + Dominant +DI
         if (
             bull_4h
             and (ema20_1h > ema50_1h)
@@ -248,7 +248,7 @@ def analyze_market(df_15m, df_1h, df_4h, symbol: str = None, now=None, only_clos
         target = price + reward if signal_side == "LONG" else price - reward
 
         conf = 65
-        if adx_1h >= 30:
+        if adx_1h >= 28:
             conf += 10
         if abs(plus_di - minus_di) >= 10:
             conf += 10
